@@ -1,0 +1,35 @@
+# Environments
+.env
+.venv
+env/
+venv/
+venv_nifty/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Configuration and Secrets
+config.yaml
+config/
+state/
+
+# Data and Logs
+data/
+historical/
+*.log
+*.csv
+*.txt
+
+# AI Conversations
+gemini-conversation*.json
+sim_output.txt
+sim.txt
+yt.txt
+yt_hi.txt
+yt_utf8.txt
+
+# Images
+*.jpg
+*.png

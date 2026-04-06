@@ -1,0 +1,31 @@
+{
+    "project_name": "Nifty-Sensex-Agent-Bot",
+    "version": "1.0.0-beta",
+    "environment": {
+        "local_inference_url": "http://localhost:11434",
+        "local_model": "qwen3:32b-coder",
+        "external_ai_provider": "gemini",
+        "external_ai_model": "gemini-2.0-flash",
+        "broker_api": "Upstox-v2"
+    },
+    "risk": {
+        "max_daily_loss_inr": 5000,
+        "per_trade_sl_pct": 15,
+        "order_type": "LIMIT",
+        "limit_buffer_pct": 0.5
+    },
+    "strategy": {
+        "name": "momentum_breakout",
+        "volume_spike_multiplier": 3,
+        "candle_timeframe_minutes": 5,
+        "nifty_strike_step": 50,
+        "sensex_strike_step": 100,
+        "sentiment_threshold": 0.6
+    },
+    "modules": [
+        "auth_manager.py",
+        "live_data_stream.py",
+        "strike_selector.py",
+        "order_executor.py"
+    ]
+}
