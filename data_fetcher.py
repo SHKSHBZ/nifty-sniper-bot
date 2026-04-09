@@ -2,6 +2,8 @@ import requests
 import threading
 import time
 import logging
+import csv
+import os
 import upstox_client
 from collections import deque
 from datetime import datetime, timedelta
@@ -41,6 +43,7 @@ class DataFetcher:
             'last_update': 0
         }
         self.vix_history = deque(maxlen=20)
+        self.spot_history = deque(maxlen=60)  # 60 readings = ~60 minutes of 1-min spot prices
         self.lock = threading.Lock()
 
         # Fix: Pre-load VIX historical SMA on startup
@@ -155,9 +158,12 @@ class DataFetcher:
                 logger.warning(f"API returned empty chain for {expiry_date}. Simulating Macro Data for Paper Mode.")
                 with self.lock:
                     self.cache.update({
-                        'pcr': 0.95, # Simulated neutral-bearish PCR
-                        'max_pain_strike': 25300, # Simulated Max Pain
-                        'max_pain_dist': 10, # Near the pin
+                        'pcr': 0.95,
+                        'focus_pcr': 1.0,
+                        'oi_pattern': {'ce_oi_change': 0, 'pe_oi_change': 0},
+                        'max_pain_strike': 25300,
+                        'max_pain_dist': 10,
+                        'spot': self.cache.get('spot', 0),
                         'last_update': time.time()
                     })
                 return
@@ -165,9 +171,16 @@ class DataFetcher:
 
             pcr = data[0].get("pcr", 1.0)
             spot = data[0].get("underlying_spot_price", 22500)
+
+            # Track spot price history for Sustain Engine
+            self.spot_history.append({'time': datetime.now(), 'spot': spot})
+
             max_pain_strike, max_pain_dist = self._calculate_max_pain(data)
             support_strike, resistance_strike = self._calculate_support_resistance(data, spot)
             change_ce_oi, change_pe_oi, atm_iv = self._extract_oi_and_iv(data, spot)
+
+            # Calculate Focus Zone metrics (7-strike localized PCR + OI patterns)
+            focus_pcr, oi_pattern = self._calculate_focus_zone_metrics(data, spot)
 
             # Track IV history for percentile calculation
             iv_history = self.cache.get('iv_history', [])
@@ -203,6 +216,8 @@ class DataFetcher:
                 self.cache.update({
                     'spot': spot,
                     'pcr': pcr,
+                    'focus_pcr': focus_pcr,
+                    'oi_pattern': oi_pattern,
                     'max_pain_strike': max_pain_strike,
                     'max_pain_dist': max_pain_dist,
                     'support_strike': support_strike,
@@ -217,13 +232,125 @@ class DataFetcher:
                     'last_update': time.time()
                 })
             logger.info(
-                f"[OK] MACRO | PCR:{pcr:.2f} | S:{support_strike} R:{resistance_strike} "
-                f"| MaxPain:{max_pain_strike} | CE-OI-Chg:{change_ce_oi} PE-OI-Chg:{change_pe_oi} | IV:{atm_iv:.1f}"
+                f"[OK] MACRO | PCR:{pcr:.2f} FocusPCR:{focus_pcr:.2f} | S:{support_strike} R:{resistance_strike} "
+                f"| MaxPain:{max_pain_strike} | CE-OI-Chg:{change_ce_oi} PE-OI-Chg:{change_pe_oi} "
+                f"| FZ-CE-Chg:{oi_pattern['ce_oi_change']} FZ-PE-Chg:{oi_pattern['pe_oi_change']} | IV:{atm_iv:.1f}"
             )
+            
+            # --- NEW: Log 7-strike Focus Zone Async ---
+            self._log_focus_zone(spot, data)
+            
         except Exception as e:
             logger.error(f"Option chain fetch failed: {e}")
             with self.lock:
                 self.cache['last_update'] = 0 # Mark as STALE/INVALID on failure
+
+    def _log_focus_zone(self, spot, chain):
+        """Asynchronously save 7-strike focus zone data to CSV."""
+        try:
+            strikes = [item["strike_price"] for item in chain]
+            if not strikes: return
+            
+            atm = min(strikes, key=lambda x: abs(x - spot))
+            focus_zone = [atm + (i * self.strike_step) for i in range(-3, 4)]
+            
+            today = datetime.now().strftime("%Y-%m-%d")
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            csv_path = f"logs/focus_zone_{today}.csv"
+            
+            rows = []
+            for item in chain:
+                strike = item["strike_price"]
+                if strike in focus_zone:
+                    ce = item.get("call_options", {})
+                    pe = item.get("put_options", {})
+                    ce_m = ce.get("market_data", {})
+                    pe_m = pe.get("market_data", {})
+                    ce_g = ce.get("option_greeks", {})
+                    pe_g = pe.get("option_greeks", {})
+                    
+                    # Position relative to ATM
+                    if strike == atm: pos_label = "ATM"
+                    elif strike > atm: pos_label = f"+{(strike - atm) // self.strike_step}"
+                    else: pos_label = str((strike - atm) // self.strike_step)
+
+                    rows.append({
+                        "timestamp": timestamp,
+                        "spot": round(spot, 2),
+                        "strike": strike,
+                        "pos": pos_label,
+                        "ce_ltp": ce_m.get("ltp", 0),
+                        "ce_oi": ce_m.get("oi", 0),
+                        "ce_delta": ce_g.get("delta", 0),
+                        "pe_ltp": pe_m.get("ltp", 0),
+                        "pe_oi": pe_m.get("oi", 0),
+                        "pe_delta": abs(pe_g.get("delta", 0)) # Ensure positive delta notation for comparison
+                    })
+                    
+            if not rows: return
+            
+            def write_csv():
+                try:
+                    file_exists_now = os.path.isfile(csv_path)
+                    with open(csv_path, 'a', newline='') as f:
+                        writer = csv.DictWriter(f, fieldnames=rows[0].keys())
+                        if not file_exists_now:
+                            writer.writeheader()
+                        writer.writerows(rows)
+                except Exception as ex:
+                    logger.error(f"Focus zone CSV write failed: {ex}")
+            
+            # Fire and forget I/O thread
+            threading.Thread(target=write_csv, daemon=True).start()
+            
+        except Exception as e:
+            logger.error(f"Failed to process focus zone logging: {e}")
+
+    def _calculate_focus_zone_metrics(self, chain, spot):
+        """
+        Calculate PCR and OI change patterns from the 7-strike Focus Zone ONLY.
+        Focus Zone = ATM ± 3 strikes (7 total).
+        
+        This gives a hyper-localized view of institutional money flow,
+        filtering out the noise from deep ITM/OTM strikes.
+        """
+        strikes = [item["strike_price"] for item in chain]
+        if not strikes:
+            return 1.0, {'ce_oi_change': 0, 'pe_oi_change': 0}
+
+        atm = min(strikes, key=lambda x: abs(x - spot))
+        focus_zone = [atm + (i * self.strike_step) for i in range(-3, 4)]
+
+        total_ce_oi = 0
+        total_pe_oi = 0
+        focus_ce_oi_change = 0
+        focus_pe_oi_change = 0
+
+        for item in chain:
+            strike = item["strike_price"]
+            if strike in focus_zone:
+                ce_data = item.get("call_options", {}).get("market_data", {})
+                pe_data = item.get("put_options", {}).get("market_data", {})
+
+                ce_oi = ce_data.get("oi", 0)
+                pe_oi = pe_data.get("oi", 0)
+                ce_prev_oi = ce_data.get("prev_oi", ce_oi)
+                pe_prev_oi = pe_data.get("prev_oi", pe_oi)
+
+                total_ce_oi += ce_oi
+                total_pe_oi += pe_oi
+                focus_ce_oi_change += (ce_oi - ce_prev_oi)
+                focus_pe_oi_change += (pe_oi - pe_prev_oi)
+
+        # Focus Zone PCR = Total PE OI / Total CE OI
+        focus_pcr = total_pe_oi / total_ce_oi if total_ce_oi > 0 else 1.0
+
+        oi_pattern = {
+            'ce_oi_change': focus_ce_oi_change,
+            'pe_oi_change': focus_pe_oi_change,
+        }
+
+        return focus_pcr, oi_pattern
 
     def _calculate_max_pain(self, chain):
         """OPTIMIZED MAX PAIN: O(n) Limited strictly to Focus Zone around ATM."""
@@ -328,6 +455,9 @@ class DataFetcher:
     def get_option_ltp(self, strike, opt_type): return self.cache.get('ltp_map', {}).get(f"{strike}_{opt_type}", 0)
     def get_instrument_token(self, strike, opt_type): return self.cache.get('token_map', {}).get(f"{strike}_{opt_type}", "")
     def is_fresh(self): return (time.time() - self.cache.get('last_update', 0)) <= 120
+    def get_focus_pcr(self): return self.cache.get('focus_pcr', 1.0)
+    def get_oi_pattern(self): return self.cache.get('oi_pattern', {'ce_oi_change': 0, 'pe_oi_change': 0})
+    def get_spot_history(self): return list(self.spot_history)
 
     def get_live_quote(self, instrument_key):
         """Turbo Query: 1 Call per 3 seconds is well within the 10/sec API limit."""

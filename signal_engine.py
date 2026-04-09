@@ -1,14 +1,16 @@
 """
 signal_engine.py
 ================
-The upgraded options buying brain: Pure Option Chain Intelligence.
-Replaces lagging chart indicators with live OI Support/Resistance & PCR.
+Sniper Entry Engine v3.0 — Institutional-Grade Options Entry Logic.
+
+Three-gate entry system:
+  Gate 1: Spot Sustain Check — Price must hold near OI wall for 3 consecutive 5m candles.
+  Gate 2: Focus Zone PCR — Localized 7-strike PCR must confirm directional bias.
+  Gate 3: OI Build-Up Confirmation — Option writers must be actively defending the wall.
 """
 
 import json
-import numpy as np
-import pandas as pd
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
@@ -28,11 +30,134 @@ PARAMS = OPTIONS_CONFIG.get("configurableParameters", {})
 SL_PCT             = PARAMS.get("premiumStopLossPercent", 30) / 100.0
 TARGET_PCT         = PARAMS.get("profitTargetPercent", 50) / 100.0
 RISK_PER_TRADE_PCT = PARAMS.get("riskPercent", 1.0) / 100.0
-DTE_EXTREME        = 3
-DTE_HIGH           = 7
+DTE_EXTREME        = PARAMS.get("dteThresholdExtreme", 3)
+DTE_HIGH           = PARAMS.get("dteThresholdHigh", 7)
 
-# Tolerance for price interacting with Support/Resistance walls
-PROXIMITY_PCT = 0.0015  # 0.15% (~33 points on Nifty)
+# Proximity: how close spot must be to S/R wall (as decimal fraction)
+PROXIMITY_PCT = PARAMS.get("wallProximityTolerancePercent", 0.15) / 100.0
+
+# Sustain parameters
+SUSTAIN_TICKS = 3       # Number of consecutive 5m candle closes required in zone
+SUSTAIN_INTERVAL = 5    # Minutes between each candle close check
+
+# Focus Zone PCR thresholds
+FOCUS_PCR_BULLISH_THRESHOLD = 1.1    # PCR above this = bullish (heavy Put writing)
+FOCUS_PCR_BEARISH_THRESHOLD = 0.85   # PCR below this = bearish (heavy Call writing)
+
+# ---------------------------------------------------------------------------
+# Gate 1: Spot Sustain Check
+# ---------------------------------------------------------------------------
+def check_sustain(spot_history, level, proximity_pct=None,
+                  required_ticks=SUSTAIN_TICKS, tick_interval=SUSTAIN_INTERVAL):
+    """
+    Verify that the spot price has sustained near a support/resistance level
+    for the required number of consecutive 5-minute candle closes.
+
+    This prevents fakeout entries where price briefly spikes to a level
+    and immediately reverses.
+
+    Args:
+        spot_history: list of {'time': datetime, 'spot': float} (polled every ~60s)
+        level: the support or resistance strike price to check against
+        proximity_pct: how close the price must be (decimal, e.g. 0.0015 = 0.15%)
+        required_ticks: number of consecutive candle closes needed in the zone
+        tick_interval: minutes between each candle close check
+
+    Returns:
+        bool: True if price has sustained in the zone for required ticks
+    """
+    if proximity_pct is None:
+        proximity_pct = PROXIMITY_PCT
+
+    # Need at least (required_ticks - 1) * interval + 1 readings
+    # For 3 ticks at 5m intervals with 1m polling: indices -1, -6, -11 → need 11 readings
+    min_readings = (required_ticks - 1) * tick_interval + 1
+    if len(spot_history) < min_readings:
+        return False
+
+    history = list(spot_history)
+
+    for i in range(required_ticks):
+        # Look back at 5-minute intervals: -1, -6, -11
+        idx = -(1 + i * tick_interval)
+        if abs(idx) > len(history):
+            return False
+
+        reading = history[idx]
+        spot = reading['spot']
+        dist = abs(spot - level) / spot
+
+        if dist > proximity_pct:
+            return False
+
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Gate 2: Focus Zone PCR Interpretation
+# ---------------------------------------------------------------------------
+def interpret_focus_pcr(focus_pcr):
+    """
+    Interpret the 7-strike Focus Zone PCR.
+
+    Unlike the full-chain PCR which is diluted by deep OTM noise,
+    this PCR reflects active institutional positioning near ATM.
+
+    Focus PCR = Total PE OI / Total CE OI (in the 7-strike zone)
+
+    Returns: 'bullish', 'bearish', or 'neutral'
+    """
+    if focus_pcr >= FOCUS_PCR_BULLISH_THRESHOLD:
+        return "bullish"      # Heavy Put OI near ATM → writers defending support
+    elif focus_pcr <= FOCUS_PCR_BEARISH_THRESHOLD:
+        return "bearish"      # Heavy Call OI near ATM → writers defending resistance
+    return "neutral"          # Contested zone, no clear conviction
+
+
+# ---------------------------------------------------------------------------
+# Gate 3: OI Build-Up Confirmation
+# ---------------------------------------------------------------------------
+def check_oi_confirmation(oi_pattern, direction):
+    """
+    Verify that option writers are actively building positions that DEFEND
+    the support/resistance wall, not unwinding/exiting.
+
+    For CE Entry (Support Bounce):
+      → Put writers should be ADDING OI (pe_oi_change > 0)
+      → They are confident support will hold
+
+    For PE Entry (Resistance Rejection):
+      → Call writers should be ADDING OI (ce_oi_change > 0)
+      → They are confident resistance will hold
+
+    Args:
+        oi_pattern: dict with 'ce_oi_change' and 'pe_oi_change' (from focus zone)
+        direction: 'CE' or 'PE'
+
+    Returns:
+        (bool, str): (confirmed, reason)
+    """
+    ce_change = oi_pattern.get('ce_oi_change', 0)
+    pe_change = oi_pattern.get('pe_oi_change', 0)
+
+    if direction == "CE":
+        if pe_change > 0:
+            return True, f"PUT OI Build-Up (+{pe_change}) → Writers defending support"
+        elif pe_change < 0:
+            return False, f"PUT OI Unwinding ({pe_change}) → Support weakening"
+        else:
+            return False, "PUT OI unchanged → No conviction"
+
+    elif direction == "PE":
+        if ce_change > 0:
+            return True, f"CALL OI Build-Up (+{ce_change}) → Writers defending resistance"
+        elif ce_change < 0:
+            return False, f"CALL OI Unwinding ({ce_change}) → Resistance weakening"
+        else:
+            return False, "CALL OI unchanged → No conviction"
+
+    return False, "Unknown direction"
+
 
 # ---------------------------------------------------------------------------
 # DTE Risk Classification
@@ -43,15 +168,16 @@ def classify_dte_risk(expiry_date_str, current_date_str=None):
         current_date = datetime.strptime(current_date_str, "%Y-%m-%d").date()
     else:
         current_date = date.today()
-        
+
     dte = (expiry - current_date).days
     dte = max(0, dte)
-    
+
     if dte <= DTE_EXTREME:
         return "EXTREME", dte
     elif dte <= DTE_HIGH:
         return "HIGH", dte
     return "MODERATE", dte
+
 
 # ---------------------------------------------------------------------------
 # Position Sizing
@@ -70,93 +196,134 @@ def calculate_position_size(capital, entry_premium, sl_premium, lot_size=65, is_
 
     return qty
 
-# ---------------------------------------------------------------------------
-# Indicator Calcs (Kept strictly for trend confirmation)
-# ---------------------------------------------------------------------------
-def calc_ema(series, span):
-    return series.ewm(span=span, adjust=False).mean()
-
-def calc_atr(df, period=14):
-    high_low = df['high'] - df['low']
-    high_close = np.abs(df['high'] - df['close'].shift())
-    low_close  = np.abs(df['low']  - df['close'].shift())
-    true_range = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
-    return true_range.rolling(period).mean()
 
 # ---------------------------------------------------------------------------
-# PCR Bias Interpretation
-# ---------------------------------------------------------------------------
-def interpret_pcr(pcr_value):
-    if pcr_value > 1.5 or pcr_value < 0.6: return "contrarian"
-    if pcr_value >= 1.05: return "bullish"
-    if pcr_value <= 0.85: return "bearish"
-    return "neutral"
-
-# ---------------------------------------------------------------------------
-# The Signal Scorer (Option Chain Pivot)
+# The Sniper Signal Engine v3.0
 # ---------------------------------------------------------------------------
 class SignalEngine:
-    def evaluate(self, spot_5m_df, spot_15m_df=None, pcr=1.0, support=0, resistance=0, 
-                 spot_close=None, expiry_date=None, current_date=None):
-        if spot_close is None:
-            spot_close = spot_5m_df['close'].iloc[-1]
+    def evaluate(self, spot_close, support, resistance, focus_pcr, oi_pattern,
+                 spot_history, expiry_date=None, current_date=None):
+        """
+        Three-Gate entry evaluation:
 
+        Gate 1: Proximity + Sustain — Price must be near a wall AND sustained 3x 5m candles.
+        Gate 2: Focus Zone PCR — Localized PCR must confirm directional bias.
+        Gate 3: OI Build-Up — Option writers must be actively defending the wall.
+
+        All three gates must PASS for a signal to fire.
+
+        Args:
+            spot_close: current spot price (float)
+            support: support strike from OI analysis (int)
+            resistance: resistance strike from OI analysis (int)
+            focus_pcr: PCR calculated from 7-strike focus zone (float)
+            oi_pattern: dict with 'ce_oi_change', 'pe_oi_change' keys (ints)
+            spot_history: list of {'time': datetime, 'spot': float} dicts
+            expiry_date: "YYYY-MM-DD" string
+            current_date: "YYYY-MM-DD" string
+
+        Returns:
+            dict with 'direction', 'reasons', 'dte_risk', 'dte_days', 'is_expiry_day', 'score'
+        """
         direction = None
         reasons = []
 
-        # 1. Option Chain Dynamics
-        pcr_bias = interpret_pcr(pcr)
+        # Calculate distances to walls
         dist_to_sup = abs(spot_close - support) / spot_close if support > 0 else 999
         dist_to_res = abs(resistance - spot_close) / spot_close if resistance > 0 else 999
 
-        # 2. Basic Underlying Momentum
-        if spot_5m_df is not None:
-            ema9  = spot_5m_df['ema_fast'].iloc[-1]
-            ema21 = spot_5m_df['ema_slow'].iloc[-1]
-            trend = "bullish" if ema9 > ema21 else "bearish"
+        # Interpret Focus Zone PCR
+        pcr_bias = interpret_focus_pcr(focus_pcr)
+
+        # ==========================================
+        # Check proximity to Support or Resistance
+        # ==========================================
+        near_support = support > 0 and dist_to_sup <= PROXIMITY_PCT
+        near_resistance = resistance > 0 and dist_to_res <= PROXIMITY_PCT
+
+        if near_support:
+            # --- GATE 1: Sustain Check at Support ---
+            sustained = check_sustain(spot_history, support)
+            if sustained:
+                reasons.append(
+                    f"✅ GATE 1 PASS: Price ({spot_close:.0f}) sustained near "
+                    f"Support ({support}) for {SUSTAIN_TICKS}x 5m candles."
+                )
+
+                # --- GATE 2: Focus Zone PCR must NOT be bearish ---
+                if pcr_bias != "bearish":
+                    reasons.append(
+                        f"✅ GATE 2 PASS: Focus PCR={focus_pcr:.2f} ({pcr_bias}) "
+                        f"supports CE entry."
+                    )
+
+                    # --- GATE 3: OI Build-Up Confirmation ---
+                    oi_confirmed, oi_reason = check_oi_confirmation(oi_pattern, "CE")
+                    if oi_confirmed:
+                        direction = "CE"
+                        reasons.append(f"✅ GATE 3 PASS: {oi_reason}")
+                    else:
+                        reasons.append(f"❌ GATE 3 FAIL: {oi_reason}")
+                else:
+                    reasons.append(
+                        f"❌ GATE 2 FAIL: Focus PCR={focus_pcr:.2f} ({pcr_bias}). "
+                        f"Bearish flow contradicts CE entry at support."
+                    )
+            else:
+                reasons.append(
+                    f"⏳ GATE 1 PENDING: Price near Support ({support}) but sustain "
+                    f"not confirmed ({SUSTAIN_TICKS}x 5m candles needed)."
+                )
+
+        elif near_resistance:
+            # --- GATE 1: Sustain Check at Resistance ---
+            sustained = check_sustain(spot_history, resistance)
+            if sustained:
+                reasons.append(
+                    f"✅ GATE 1 PASS: Price ({spot_close:.0f}) sustained near "
+                    f"Resistance ({resistance}) for {SUSTAIN_TICKS}x 5m candles."
+                )
+
+                # --- GATE 2: Focus Zone PCR must NOT be bullish ---
+                if pcr_bias != "bullish":
+                    reasons.append(
+                        f"✅ GATE 2 PASS: Focus PCR={focus_pcr:.2f} ({pcr_bias}) "
+                        f"supports PE entry."
+                    )
+
+                    # --- GATE 3: OI Build-Up Confirmation ---
+                    oi_confirmed, oi_reason = check_oi_confirmation(oi_pattern, "PE")
+                    if oi_confirmed:
+                        direction = "PE"
+                        reasons.append(f"✅ GATE 3 PASS: {oi_reason}")
+                    else:
+                        reasons.append(f"❌ GATE 3 FAIL: {oi_reason}")
+                else:
+                    reasons.append(
+                        f"❌ GATE 2 FAIL: Focus PCR={focus_pcr:.2f} ({pcr_bias}). "
+                        f"Bullish flow contradicts PE entry at resistance."
+                    )
+            else:
+                reasons.append(
+                    f"⏳ GATE 1 PENDING: Price near Resistance ({resistance}) but "
+                    f"sustain not confirmed ({SUSTAIN_TICKS}x 5m candles needed)."
+                )
+
         else:
-            trend = "neutral"
-
-        # Strategy 1: Support Bounce
-        if support > 0 and dist_to_sup <= PROXIMITY_PCT:
-            reasons.append(f"Price ({spot_close:.0f}) near Support OI Wall ({support}).")
-            if pcr_bias != "bearish" and trend != "bearish":
-                direction = "CE"
-                reasons.append(f"-> Bounce Confirmed: PCR={pcr:.2f} & Trend aligns.")
-            else:
-                reasons.append(f"-> Pass: PCR is {pcr_bias} or Trend is {trend}.")
-
-        # Strategy 2: Resistance Rejection
-        elif resistance > 0 and dist_to_res <= PROXIMITY_PCT:
-            reasons.append(f"Price ({spot_close:.0f}) near Resistance OI Wall ({resistance}).")
-            if pcr_bias != "bullish" and trend != "bullish":
-                direction = "PE"
-                reasons.append(f"-> Rejection Confirmed: PCR={pcr:.2f} & Trend aligns.")
-            else:
-                reasons.append(f"-> Pass: PCR is {pcr_bias} or Trend is {trend}.")
-
-        # 15-Minute Macro Filter
-        if direction and spot_15m_df is not None:
-            ema9_15m = spot_15m_df['ema_fast'].iloc[-1]
-            if direction == "CE" and spot_close < ema9_15m:
-                reasons.append(f"15m FILTER BLOCK: Spot {spot_close:.0f} below 15m VWAP/EMA {ema9_15m:.0f}")
-                direction = None
-            elif direction == "PE" and spot_close > ema9_15m:
-                reasons.append(f"15m FILTER BLOCK: Spot {spot_close:.0f} above 15m VWAP/EMA {ema9_15m:.0f}")
-                direction = None
+            reasons.append(
+                f"No proximity: Spot={spot_close:.0f} | "
+                f"S={support} (dist={dist_to_sup:.4f}) | "
+                f"R={resistance} (dist={dist_to_res:.4f})"
+            )
 
         # DTE Risk Classification
         dte_risk = "MODERATE"
         dte_days = 99
         is_expiry_day = False
-        
+
         if expiry_date:
             dte_risk, dte_days = classify_dte_risk(expiry_date, current_date)
             is_expiry_day = (dte_days <= 0)
-
-        # Log PCR/OI state regardless of trade
-        if direction is None:
-            reasons.append(f"Chain State: S={support} R={resistance} PCR={pcr:.2f}")
 
         return {
             "direction": direction,
