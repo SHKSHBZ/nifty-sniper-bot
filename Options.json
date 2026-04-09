@@ -1,0 +1,91 @@
+{
+  "botSpecification": {
+    "name": "Nifty_Pure_Options_Buyer_Bot",
+    "version": "2.0",
+    "description": "Professional institutional-grade Naked Options Buying bot for NIFTY 50. Operates STRICTLY on Live Option Chain Intelligence (OI Support/Resistance Walls) and Live Greeks (Delta > 0.40). Replaces lagging chart indicators with real-time institutional positioning data. Incorporates heavy Theta-decay shielding (max holding time) and Dynamic Trailing Stop-Loss for Expiry 0-DTE survival.",
+    "targetInstruments": ["NIFTY"],
+    "focusExpiries": ["weekly"],
+    "strategyType": "pure_options_buying_naked",
+    "maxRiskPerTradePercent": 1.0
+  },
+
+  "pureOptionChainAnalysis": {
+    "description": "Replaces all visual chart reading and lagging indicators with numerical rules driven strictly by Open Interest walls and Greeks.",
+    "dataRequirements": {
+      "timeframes": ["1min", "5min"],
+      "requiredData": ["option_chain_snapshot", "live_greeks", "spot_ltp"],
+      "sources": ["Upstox_Live_Option_Chain_API"]
+    },
+    "triggerConditions": {
+      "supportBounce": {
+        "logic": "If Spot Price falls within 0.15% proximity of the Highest Put OI Wall (Support) AND PCR is not bearish.",
+        "action": "Buy ATM/ITM Call Option (CE)"
+      },
+      "resistanceRejection": {
+        "logic": "If Spot Price rallies within 0.15% proximity of the Highest Call OI Wall (Resistance) AND PCR is not bullish.",
+        "action": "Buy ATM/ITM Put Option (PE)"
+      }
+    },
+    "macroFilters": {
+      "pcrRules": {
+        "pcr_gt_1_5": "overbought_market_expect_rejection",
+        "pcr_lt_0_7": "oversold_market_expect_bounce"
+      },
+      "trendConfirmation": "Price must be aligned with 15-minute VWAP/EMA to avoid catching failing knives (Optional Safety Gate)."
+    }
+  },
+
+  "liveGreeksIntegration": {
+    "deltaFilter": "Strictly ONLY buy options where Delta > 0.40. Rejects cheap OTM options that do not move sufficiently.",
+    "gammaSpike": "On 0-DTE Expiry days, prioritize strikes with high Gamma for explosive premium scaling upon bouncing off OI walls.",
+    "thetaMonitor": "Evaluate live Theta decay rate. If underlying spot movement speed (ATR) cannot outrun the Theta decay rate, reject trade."
+  },
+
+  "advancedRiskManagement": {
+    "positionSizing": "Risk exactly 'riskPercent' of Total Capital (e.g., Rs. 1000 on 1 Lakh account). Automatically calculates lot size based on Stop Loss distance.",
+    "exitRules": {
+      "thetaShield": {
+        "description": "Time-based Stop-Loss to prevent sideways Theta bleed on naked buying.",
+        "expiryDayMaxHold": "45_minutes_force_exit_at_market (0-DTE)",
+        "normalDayMaxHold": "120_minutes_force_exit_at_market (High DTE)"
+      },
+      "dynamicTrailingStop": {
+        "trigger": "+15_percent_profit_hit",
+        "action": "Move Stop-Loss to +2% (Breakeven + Buffer) locking in a risk-free trade"
+      },
+      "standardTargets": {
+        "normalDay": "Take Profit = 50%, Hard Stop Loss = -30%",
+        "expiryDay": "Take Profit = 35%, Hard Stop Loss = -20% (Tighter leash due to volatility)"
+      },
+      "timeBasedExit": "Force exit all open active positions at exactly 14:30 PM (Avoid 3PM wild whipsaws)."
+    }
+  },
+
+  "dailyWorkflow": [
+    "09:15_AM - 10:00_AM: Do nothing (Avoid morning opening volatility and false OI spikes).",
+    "10:00_AM: Begin scanning Live Upstox Option Chain every minute.",
+    "Detect massive Call OI (Resistance) and Put OI (Support) walls dynamically.",
+    "Track Nifty Spot. If Spot touches the OI Wall within 0.15% tolerance, verify Delta > 0.40.",
+    "Execute Naked Option Buy (CE for Support Bounce, PE for Resistance Rejection).",
+    "Monitor trade using Trailing Stop Loss, Hard Stop Loss, and Theta Shield (Time Expiration).",
+    "14:30_PM: Halt all new entries and close any remaining open positions."
+  ],
+
+  "configurableParameters": {
+    "riskPercent": 1.0,
+    "dteThresholdExtreme": 3,
+    "dteThresholdHigh": 7,
+    "wallProximityTolerancePercent": 0.15,
+    "minimumDeltaForEntry": 0.40,
+    "normalDayStopLossPercent": 30,
+    "normalDayTargetPercent": 50,
+    "expiryDayStopLossPercent": 20,
+    "expiryDayTargetPercent": 35,
+    "trailingStopTriggerPercent": 15,
+    "trailingStopLockInPercent": 2,
+    "thetaShieldExpiryMins": 45,
+    "thetaShieldNormalMins": 120,
+    "telegramAlerts": true,
+    "paperTradeMode": true
+  }
+}

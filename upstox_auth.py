@@ -158,7 +158,7 @@ class UpstoxAuth:
                 f"&redirect_uri={self.redirect_uri}"
             )
             
-            print(f"\n🌐 UPSTOX LOGIN PROCESS")
+            print(f"\n[UPSTOX LOGIN PROCESS]")
             print(f"=" * 30)
             print(f"1. Browser will open automatically")
             print(f"2. Login with your Upstox credentials")
@@ -167,12 +167,12 @@ class UpstoxAuth:
             print(f"=" * 30)
             
             # Open browser
-            print(f"\n🔗 Opening browser...")
+            print(f"\n[Opening browser...]")
             webbrowser.open(login_url)
             
             # Get redirect URL from user
-            print(f"\n📋 After successful login and authorization:")
-            redirect_url = input("📎 Paste the complete redirect URL here: ").strip()
+            print(f"\n[After successful login and authorization:]")
+            redirect_url = input("[URL] Paste the complete redirect URL here: ").strip()
             
             if not redirect_url:
                 print("[FAIL] No URL provided")
@@ -188,7 +188,7 @@ class UpstoxAuth:
                 print("[FAIL] No authorization code found in URL")
                 return False
             
-            print(f"🎟️ Auth Code extracted: {code[:10]}...")
+            print(f"[AUTH] Auth Code extracted: {code[:10]}...")
             
             # Exchange code for access token
             url = 'https://api.upstox.com/v2/login/authorization/token'
@@ -254,7 +254,7 @@ class UpstoxAuth:
             with open(self.session_file, 'w') as f:
                 json.dump(session_data, f, indent=2)
             
-            print(f"💾 Session saved until: {next_6am.strftime('%Y-%m-%d 06:00:00')}")
+            print(f"[SAVE] Session saved until: {next_6am.strftime('%Y-%m-%d 06:00:00')}")
             
         except Exception as e:
             print(f"[FAIL] Failed to save session: {e}")
@@ -271,14 +271,14 @@ class UpstoxAuth:
                 session_data = json.load(f)
             
             if session_data.get('client_id') != self.client_id:
-                print("⚠️ Session Client ID mismatch")
+                print("[WARNING] Session Client ID mismatch")
                 return False
             
             expires_at = datetime.fromisoformat(session_data['expires_at'])
             now = datetime.now(IST)
             
             if now >= expires_at:
-                print(f"⏰ Session expired at {expires_at}")
+                print(f"[EXPIRED] Session expired at {expires_at}")
                 return False
             
             self.access_token = session_data['access_token']
@@ -287,7 +287,7 @@ class UpstoxAuth:
             return True
             
         except Exception as e:
-            print(f"⚠️ Session validation failed: {e}")
+            print(f"[WARNING] Session validation failed: {e}")
             return False
 
     def is_session_valid(self) -> bool:
@@ -299,6 +299,9 @@ class UpstoxAuth:
             return False
             
     def get_access_token(self):
+        if not self.client_id:
+            self.load_credentials()
+            
         if self.access_token:
             return self.access_token
         if self.load_session():

@@ -208,8 +208,8 @@ class OrderExecutor:
     def _check_daily_loss_limit(self):
         if self._daily_pnl <= -MAX_DAILY_LOSS_INR:
             raise RuntimeError(
-                f"SAFETY BLOCK: Daily loss limit of ₹{MAX_DAILY_LOSS_INR:,.0f} reached. "
-                f"Current PnL: ₹{self._daily_pnl:,.2f}. No more orders today."
+                f"SAFETY BLOCK: Daily loss limit of Rs. {MAX_DAILY_LOSS_INR:,.0f} reached. "
+                f"Current PnL: Rs. {self._daily_pnl:,.2f}. No more orders today."
             )
 
     def _get_ltp(self, instrument_key: str, symbol: str) -> Optional[float]:
@@ -263,7 +263,7 @@ class OrderExecutor:
             dry_run=True,
             message=(
                 f"[DRY RUN] Would buy {quantity} × {instrument_key} "
-                f"@ ₹{limit_price} | SL: ₹{sl_price} | Target: ₹{target_price}"
+                f"@ Rs. {limit_price} | SL: Rs. {sl_price} | Target: Rs. {target_price}"
             ),
         )
 
@@ -326,7 +326,7 @@ class OrderExecutor:
     def update_daily_pnl(self, realized_pnl: float):
         """Call this after each trade closes to track daily loss."""
         self._daily_pnl += realized_pnl
-        logger.info("Daily PnL updated: ₹%.2f / -₹%.2f limit", self._daily_pnl, MAX_DAILY_LOSS_INR)
+        logger.info("Daily PnL updated: Rs. %.2f / -Rs. %.2f limit", self._daily_pnl, MAX_DAILY_LOSS_INR)
 
 
 if __name__ == "__main__":

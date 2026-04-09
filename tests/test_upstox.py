@@ -2,15 +2,18 @@ import os
 import upstox_client
 from upstox_client.rest import ApiException
 from dotenv import load_dotenv
+from upstox_auth import UpstoxAuth
 
 load_dotenv()
 
 def test_upstox_connection():
     api_key = os.getenv("UPSTOX_API_KEY")
-    access_token = os.getenv("UPSTOX_ACCESS_TOKEN")
+    
+    auth = UpstoxAuth()
+    access_token = auth.get_access_token()
     
     if not api_key or not access_token:
-        print("Error: UPSTOX_API_KEY or UPSTOX_ACCESS_TOKEN missing in .env")
+        print("Error: Could not retrieve API Key or Access Token. Make sure to authenticate first!")
         return
 
     # Configure API client

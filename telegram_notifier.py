@@ -1,22 +1,26 @@
+import os
 import requests
 import threading
 import time
 import logging
 from datetime import datetime
+from dotenv import load_dotenv
+
+load_dotenv()
 
 logger = logging.getLogger("TelegramNotifier")
 
 class TelegramNotifier:
-    def __init__(self, config):
-        self.token = config.get('telegram_token')
-        self.chat_id = config.get('telegram_chat_id')
+    def __init__(self):
+        self.token = os.getenv('TELEGRAM_BOT_TOKEN')
+        self.chat_id = os.getenv('TELEGRAM_CHAT_ID')
         self.enabled = bool(self.token and self.chat_id)
         if self.enabled:
             logger.info("Telegram alerts ENABLED")
         else:
             logger.warning("Telegram alerts DISABLED — add token & chat_id to config.yaml")
 
-    def send(self, message):
+    def send_message(self, message):
         if not self.enabled:
             return
         try:

@@ -1,0 +1,199 @@
+{
+    "botSpecification": {
+        "name": "NiftySensex_Weekly_Options_Buyer_Bot",
+        "version": "1.1",
+        "description": "Professional directional options buying bot for NIFTY 50 and SENSEX. Combines options chain OI intelligence, quantitative chart analysis (no visual/image processing), Greeks-free proxies for theta/gamma, and optional debit-spread hedging. Special emphasis on weekly expiries with strict time-decay protection.",
+        "targetInstruments": [
+            "NIFTY",
+            "SENSEX"
+        ],
+        "focusExpiries": [
+            "weekly"
+        ],
+        "strategyType": "options_buying_with_optional_hedging",
+        "maxRiskPerTradePercent": 1.0
+    },
+    "quantitativeChartAnalysis": {
+        "description": "Replaces all visual chart reading with numerical rules on OHLCV candle data (5min and 15min timeframes). Bot fetches raw candles via broker API and applies rules.",
+        "dataRequirements": {
+            "timeframes": [
+                "5min",
+                "15min"
+            ],
+            "requiredData": [
+                "spot_ohlcv",
+                "option_premium_ohlcv_for_selected_strike"
+            ],
+            "sources": [
+                "Zerodha_Kite",
+                "Upstox",
+                "Alice_Blue",
+                "5Paisa",
+                "nselib_for_backtesting"
+            ]
+        },
+        "spotChartRules": {
+            "trendDetection": "EMA9 > EMA21 = bullish bias; EMA9 < EMA21 = bearish bias",
+            "swingTrend": "Detect higher highs & higher lows (bullish) or lower highs & lower lows (bearish) over last 5-10 swings",
+            "supportResistance": "Use recent swing highs/lows OR high-OI strikes from chain as dynamic levels",
+            "breakoutConfirmation": "Price crosses resistance/support + volume > 1.5 * 20-period average volume = strong signal",
+            "oiLevelIntegration": "Mark top-3 Call OI strikes as resistance and top-3 Put OI strikes as support"
+        },
+        "optionPremiumChartRules": {
+            "gammaProxy": "abs((premium_pct_change / spot_pct_change)) > 0.6 → high gamma (fast reaction preferred)",
+            "thetaDecayProxy": "spot_change_last_5_candles < 0.002 AND premium_change_last_5_candles < -0.01 → decay active (warning or exit)",
+            "momentumCheck": "Premium making higher highs while spot is flat or rising = positive confirmation"
+        },
+        "combinedSignalWeight": "At least 3 out of 4 chart rules must align with OI bias before generating entry signal"
+    },
+    "dataRequirements": {
+        "requiredAPIs": [
+            "NSE_official",
+            "Broker_API_Zerodha_KiteConnect",
+            "Upstox",
+            "Alice_Blue",
+            "5Paisa"
+        ],
+        "dataFields": {
+            "spot": [
+                "ltp",
+                "volume",
+                "5min_candles",
+                "15min_candles"
+            ],
+            "optionsChain": [
+                "strike",
+                "oi",
+                "changeInOi",
+                "volume",
+                "ltp_premium",
+                "iv",
+                "bid",
+                "ask",
+                "pcr_total",
+                "max_pain",
+                "atm_iv",
+                "iv_percentile"
+            ],
+            "expiryInfo": [
+                "daysToExpiry",
+                "expiryDate",
+                "atmStrike"
+            ],
+            "individualStrikeCharts": [
+                "ce_symbol",
+                "pe_symbol",
+                "premium_5min_ohlcv"
+            ]
+        },
+        "newsSentiment": "optional (keyword scan or external API for bullish/bearish cues)"
+    },
+    "chainAnalysis": {
+        "focusZoneRule": "ATM strike + exactly 3 strikes above + 3 strikes below",
+        "keySignals": {
+            "supportZone": "Highest Put OI cluster in the lower 3 strikes (put writers defending)",
+            "resistanceZone": "Highest Call OI cluster in the upper 3 strikes (call writers defending)",
+            "buildupInterpretation": {
+                "risingCallOiNearResistance": "bearish_pressure",
+                "risingPutOiNearSupport": "bullish_bias"
+            },
+            "pcrRules": {
+                "pcr_gt_1_0": "mild_bullish",
+                "pcr_lt_0_8": "bearish",
+                "extreme_pcr_gt_1_5_or_lt_0_7": "possible_contrarian_filter"
+            }
+        },
+        "maxPainAlignment": "Price likely to gravitate toward max pain by expiry — use as additional filter"
+    },
+    "greeksProxies": {
+        "thetaDecayRisk": {
+            "dte_le_3": "EXTREME_risk__avoid_naked_buys_or_use_only_spreads",
+            "dte_4_to_7": "high_risk",
+            "dte_8_plus": "moderate_risk",
+            "highIvPercentile_gt_70": "faster_decay_warning"
+        },
+        "gammaProxy": "highest_near_ATM_zone_within_0_8_to_1_percent_of_spot",
+        "ivRuleForBuyers": "prefer_iv_percentile_lt_50 (buy when volatility is relatively cheap)"
+    },
+    "hedgingModule": {
+        "defaultMode": "debit_spread_recommended",
+        "modes": {
+            "naked": "higher_reward_higher_risk",
+            "debitSpread": {
+                "bullCallSpread": "Buy ATM_or_slightly_OTM_CE + Sell higher_OTM_CE (1-2 strikes above)",
+                "bearPutSpread": "Buy ATM_or_slightly_OTM_PE + Sell lower_OTM_PE (1-2 strikes below)",
+                "benefits": "lower_max_loss, reduced_theta_impact, defined_risk"
+            }
+        },
+        "spreadCalculation": {
+            "netDebit": "bought_premium - sold_premium",
+            "maxLoss": "netDebit * lotSize",
+            "breakeven": "lower_strike + netDebit (for calls)",
+            "maxProfit": "strike_width - netDebit"
+        }
+    },
+    "entryExitRules": {
+        "entryConditions": [
+            "clear_bias_from_OI_chain_and_spot_chart",
+            "dte_and_iv_acceptable",
+            "premium_reacting_positively_on_strike_chart",
+            "chart_rules_score >= minimum_threshold",
+            "news_sentiment_alignment_optional"
+        ],
+        "exitRules": {
+            "profitTarget": "40_to_60_percent_on_net_premium_or_hit_opposite_OI_level",
+            "stopLoss": "30_percent_loss_on_premium_or_spot_breaks_opposite_OI_zone",
+            "timeBasedExit": "exit_by_14_30_to_15_00_if_no_significant_movement",
+            "expiryDaySpecialRule": "detect_weekly_expiry_day → increase_theta_weight, reduce_position_size_50_70_percent, prefer_debit_spreads_only"
+        },
+        "positionSizing": "risk_max_1_percent_of_total_capital_per_trade"
+    },
+    "dailyWorkflow": [
+        "09:00_AM: Fetch spot price + full options chain for next weekly expiry",
+        "Identify ATM strike + 6-strike focus zone",
+        "Run OI, Change in OI, PCR, Max Pain analysis",
+        "Fetch 5min/15min OHLCV for spot and run quantitative chart rules",
+        "Check DTE, IV percentile, decay/gamma proxies",
+        "Generate signal: Bullish (Call), Bearish (Put), or Flat",
+        "Decide naked vs debit spread mode",
+        "Calculate position size and place broker order if conditions met",
+        "Monitor live candles + premium charts and apply exit rules automatically"
+    ],
+    "configurableParameters": {
+        "riskPercent": 1.0,
+        "dteThresholdExtreme": 3,
+        "dteThresholdHigh": 7,
+        "ivPercentileMaxForEntry": 50,
+        "chartRulesMinScore": 3,
+        "premiumStopLossPercent": 30,
+        "profitTargetPercent": 50,
+        "enableHedgingByDefault": true,
+        "enableQuantitativeChartAnalysis": true,
+        "telegramAlerts": true,
+        "paperTradeMode": true,
+        "backtestMode": true,
+        "logFullReasoning": true
+    },
+    "librariesRecommended": {
+        "dataProcessing": [
+            "pandas",
+            "numpy"
+        ],
+        "technicalIndicators": [
+            "pandas_ta",
+            "ta-lib"
+        ],
+        "brokerIntegration": [
+            "kiteconnect",
+            "upstox-python",
+            "nselib"
+        ],
+        "candleGeneration": "convert_ticks_to_ohlc_if_needed (resample 1min to 5min)"
+    },
+    "additionalFeatures": {
+        "logging": "full_trade_reasoning_including_OI_bias_chart_score_hedge_details",
+        "alerts": "Telegram_or_WhatsApp_with_justification",
+        "backtesting": "support_historical_chain_and_spot_candle_data",
+        "simulationMode": "paper_trading_enabled"
+    }
+}
