@@ -147,18 +147,21 @@ class LiveOrchestrator:
         if time_str < "10:00:00": return
 
         spot = self.fetcher.get_spot()
-        pcr = self.fetcher.get_pcr()
         sup = self.fetcher.get_support()
         res = self.fetcher.get_resistance()
         exp = self.fetcher.get_expiry_date()
+        focus_pcr = self.fetcher.get_focus_pcr()
+        oi_pattern = self.fetcher.get_oi_pattern()
+        spot_history = self.fetcher.get_spot_history()
 
         if spot == 0 or sup == 0: return
 
-        # Call Engine (Pure Option Chain variant)
+        # Call Sniper Engine v3.0 (Three-Gate System)
         signal = self.engine.evaluate(
-            spot_5m_df=None, spot_15m_df=None, 
-            pcr=pcr, support=sup, resistance=res, 
-            spot_close=spot, expiry_date=exp, current_date=now.strftime("%Y-%m-%d")
+            spot_close=spot, support=sup, resistance=res,
+            focus_pcr=focus_pcr, oi_pattern=oi_pattern,
+            spot_history=spot_history,
+            expiry_date=exp, current_date=now.strftime("%Y-%m-%d")
         )
 
         if signal['direction']:
@@ -170,6 +173,12 @@ class LiveOrchestrator:
             # Find the best valid strike from the Greeks map
             best_strike = atm_strike
             live_premium = self.fetcher.get_option_ltp(best_strike, direction)
+            
+            # Guard: Reject if premium data is missing or zero
+            if live_premium <= 0:
+                logger.info(f"Signal Generated ({direction}) but premium for {best_strike} is Rs.{live_premium}. Stale data. Skipping.")
+                return
+
             greeks = self.fetcher.get_strike_greeks(best_strike, direction)
 
             delta = greeks.get('delta', 0)
@@ -215,7 +224,8 @@ class LiveOrchestrator:
             logger.info(msg)
             self.telegram.send_message(msg)
         else:
-            logger.info(f"Scanning... PCR: {pcr:.2f} | S:{sup} R:{res} | Spot: {spot:.0f}")
+            reason_summary = signal['reasons'][0] if signal['reasons'] else "No signal"
+            logger.info(f"Scanning... FocusPCR: {focus_pcr:.2f} | S:{sup} R:{res} | Spot: {spot:.0f} | {reason_summary}")
 
 
     def _close_position(self, reason, exit_price=None):
