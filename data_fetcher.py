@@ -451,9 +451,18 @@ class DataFetcher:
     def get_change_in_pe_oi(self): return self.cache.get('change_in_pe_oi', 0)
     def get_atm_iv(self): return self.cache.get('atm_iv', 0)
     def get_iv_history(self): return self.cache.get('iv_history', [])
-    def get_strike_greeks(self, strike, opt_type): return self.cache.get('greeks_map', {}).get(f"{strike}_{opt_type}", {'delta': 0, 'theta': 0, 'gamma': 0})
-    def get_option_ltp(self, strike, opt_type): return self.cache.get('ltp_map', {}).get(f"{strike}_{opt_type}", 0)
-    def get_instrument_token(self, strike, opt_type): return self.cache.get('token_map', {}).get(f"{strike}_{opt_type}", "")
+    def get_india_vix(self): return self.vix_history[-1] if self.vix_history else 13.5
+    def get_strike_greeks(self, strike, opt_type):
+        mapping = self.cache.get('greeks_map', {})
+        return mapping.get(f"{float(strike)}_{opt_type}", mapping.get(f"{int(strike)}_{opt_type}", {'delta': 0, 'theta': 0, 'gamma': 0}))
+        
+    def get_option_ltp(self, strike, opt_type):
+        mapping = self.cache.get('ltp_map', {})
+        return mapping.get(f"{float(strike)}_{opt_type}", mapping.get(f"{int(strike)}_{opt_type}", 0))
+        
+    def get_instrument_token(self, strike, opt_type):
+        mapping = self.cache.get('token_map', {})
+        return mapping.get(f"{float(strike)}_{opt_type}", mapping.get(f"{int(strike)}_{opt_type}", ""))
     def is_fresh(self): return (time.time() - self.cache.get('last_update', 0)) <= 120
     def get_focus_pcr(self): return self.cache.get('focus_pcr', 1.0)
     def get_oi_pattern(self): return self.cache.get('oi_pattern', {'ce_oi_change': 0, 'pe_oi_change': 0})

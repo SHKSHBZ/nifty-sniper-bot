@@ -19,7 +19,7 @@ logging.basicConfig(
     format='%(asctime)s | %(levelname)s | %(message)s',
     datefmt='%H:%M:%S',
     handlers=[
-        logging.FileHandler(f"logs/sniper_bot_{todays_date}.log"),
+        logging.FileHandler(f"logs/sniper_bot_{todays_date}.log", encoding="utf-8"),
         logging.StreamHandler(sys.stdout)
     ]
 )
@@ -30,7 +30,7 @@ PORTFOLIO_FILE = Path("data/paper_portfolio.json")
 class LiveOrchestrator:
     def __init__(self, config_file="project_config.json"):
         print("="*60)
-        print(f"🚀 PURE OPTIONS BUYER [LIVE PAPER MODE] | Config: {config_file}")
+        print(f"[*] PURE OPTIONS BUYER [LIVE PAPER MODE] | Config: {config_file}")
         print("="*60)
         
         self.auth = UpstoxAuth()
@@ -153,6 +153,7 @@ class LiveOrchestrator:
         focus_pcr = self.fetcher.get_focus_pcr()
         oi_pattern = self.fetcher.get_oi_pattern()
         spot_history = self.fetcher.get_spot_history()
+        india_vix = self.fetcher.get_india_vix()
 
         if spot == 0 or sup == 0: return
 
@@ -160,7 +161,7 @@ class LiveOrchestrator:
         signal = self.engine.evaluate(
             spot_close=spot, support=sup, resistance=res,
             focus_pcr=focus_pcr, oi_pattern=oi_pattern,
-            spot_history=spot_history,
+            spot_history=spot_history, india_vix=india_vix,
             expiry_date=exp, current_date=now.strftime("%Y-%m-%d")
         )
 

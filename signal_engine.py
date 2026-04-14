@@ -202,28 +202,16 @@ def calculate_position_size(capital, entry_premium, sl_premium, lot_size=65, is_
 # ---------------------------------------------------------------------------
 class SignalEngine:
     def evaluate(self, spot_close, support, resistance, focus_pcr, oi_pattern,
-                 spot_history, expiry_date=None, current_date=None):
+                 spot_history, india_vix=15.0, expiry_date=None, current_date=None):
         """
         Three-Gate entry evaluation:
 
+        Gate 0: India VIX Macro Trend - Restricts contrarian entries based on volatility.
         Gate 1: Proximity + Sustain — Price must be near a wall AND sustained 3x 5m candles.
         Gate 2: Focus Zone PCR — Localized PCR must confirm directional bias.
         Gate 3: OI Build-Up — Option writers must be actively defending the wall.
 
-        All three gates must PASS for a signal to fire.
-
-        Args:
-            spot_close: current spot price (float)
-            support: support strike from OI analysis (int)
-            resistance: resistance strike from OI analysis (int)
-            focus_pcr: PCR calculated from 7-strike focus zone (float)
-            oi_pattern: dict with 'ce_oi_change', 'pe_oi_change' keys (ints)
-            spot_history: list of {'time': datetime, 'spot': float} dicts
-            expiry_date: "YYYY-MM-DD" string
-            current_date: "YYYY-MM-DD" string
-
-        Returns:
-            dict with 'direction', 'reasons', 'dte_risk', 'dte_days', 'is_expiry_day', 'score'
+        All gates must PASS for a signal to fire.
         """
         direction = None
         reasons = []
@@ -234,6 +222,9 @@ class SignalEngine:
 
         # Interpret Focus Zone PCR
         pcr_bias = interpret_focus_pcr(focus_pcr)
+        
+        # Interpret VIX Trend (>= 18 is fear/downtrend -> Bearish, < 18 is growth -> Bullish)
+        vix_trend = "bearish" if india_vix >= 18.0 else "bullish"
 
         # ==========================================
         # Check proximity to Support or Resistance
@@ -250,28 +241,37 @@ class SignalEngine:
                     f"Support ({support}) for {SUSTAIN_TICKS}x 5m candles."
                 )
 
-                # --- GATE 2: Focus Zone PCR must NOT be bearish ---
-                if pcr_bias != "bearish":
+                # --- GATE 0: VIX Macro Trend Check ---
+                if vix_trend == "bearish":
                     reasons.append(
-                        f"✅ GATE 2 PASS: Focus PCR={focus_pcr:.2f} ({pcr_bias}) "
-                        f"supports CE entry."
+                        f"❌ GATE 0 FAIL: India VIX is {india_vix:.2f} (Fear/Downtrend). "
+                        f"Taking CE (Call) entries against the macro trend is blocked."
                     )
-
-                    # --- GATE 3: OI Build-Up Confirmation ---
-                    oi_confirmed, oi_reason = check_oi_confirmation(oi_pattern, "CE")
-                    if oi_confirmed:
-                        direction = "CE"
-                        reasons.append(f"✅ GATE 3 PASS: {oi_reason}")
-                    else:
-                        reasons.append(f"❌ GATE 3 FAIL: {oi_reason}")
                 else:
-                    reasons.append(
-                        f"❌ GATE 2 FAIL: Focus PCR={focus_pcr:.2f} ({pcr_bias}). "
-                        f"Bearish flow contradicts CE entry at support."
-                    )
+                    reasons.append(f"✅ GATE 0 PASS: VIX={india_vix:.2f} supports CE entries.")
+
+                    # --- GATE 2: Focus Zone PCR must NOT be bearish ---
+                    if pcr_bias != "bearish":
+                        reasons.append(
+                            f"✅ GATE 2 PASS: Focus PCR={focus_pcr:.2f} ({pcr_bias}) "
+                            f"supports CE entry."
+                        )
+
+                        # --- GATE 3: OI Build-Up Confirmation ---
+                        oi_confirmed, oi_reason = check_oi_confirmation(oi_pattern, "CE")
+                        if oi_confirmed:
+                            direction = "CE"
+                            reasons.append(f"✅ GATE 3 PASS: {oi_reason}")
+                        else:
+                            reasons.append(f"❌ GATE 3 FAIL: {oi_reason}")
+                    else:
+                        reasons.append(
+                            f"❌ GATE 2 FAIL: Focus PCR={focus_pcr:.2f} ({pcr_bias}). "
+                            f"Bearish flow contradicts CE entry at support."
+                        )
             else:
                 reasons.append(
-                    f"⏳ GATE 1 PENDING: Price near Support ({support}) but sustain "
+                    f"[WAIT] GATE 1 PENDING: Price near Support ({support}) but sustain "
                     f"not confirmed ({SUSTAIN_TICKS}x 5m candles needed)."
                 )
 
@@ -284,28 +284,37 @@ class SignalEngine:
                     f"Resistance ({resistance}) for {SUSTAIN_TICKS}x 5m candles."
                 )
 
-                # --- GATE 2: Focus Zone PCR must NOT be bullish ---
-                if pcr_bias != "bullish":
+                # --- GATE 0: VIX Macro Trend Check ---
+                if vix_trend == "bullish":
                     reasons.append(
-                        f"✅ GATE 2 PASS: Focus PCR={focus_pcr:.2f} ({pcr_bias}) "
-                        f"supports PE entry."
+                        f"❌ GATE 0 FAIL: India VIX is {india_vix:.2f} (Growth/Uptrend). "
+                        f"Taking PE (Put) entries against the macro trend is blocked."
                     )
-
-                    # --- GATE 3: OI Build-Up Confirmation ---
-                    oi_confirmed, oi_reason = check_oi_confirmation(oi_pattern, "PE")
-                    if oi_confirmed:
-                        direction = "PE"
-                        reasons.append(f"✅ GATE 3 PASS: {oi_reason}")
-                    else:
-                        reasons.append(f"❌ GATE 3 FAIL: {oi_reason}")
                 else:
-                    reasons.append(
-                        f"❌ GATE 2 FAIL: Focus PCR={focus_pcr:.2f} ({pcr_bias}). "
-                        f"Bullish flow contradicts PE entry at resistance."
-                    )
+                    reasons.append(f"✅ GATE 0 PASS: VIX={india_vix:.2f} supports PE entries.")
+
+                    # --- GATE 2: Focus Zone PCR must NOT be bullish ---
+                    if pcr_bias != "bullish":
+                        reasons.append(
+                            f"✅ GATE 2 PASS: Focus PCR={focus_pcr:.2f} ({pcr_bias}) "
+                            f"supports PE entry."
+                        )
+
+                        # --- GATE 3: OI Build-Up Confirmation ---
+                        oi_confirmed, oi_reason = check_oi_confirmation(oi_pattern, "PE")
+                        if oi_confirmed:
+                            direction = "PE"
+                            reasons.append(f"✅ GATE 3 PASS: {oi_reason}")
+                        else:
+                            reasons.append(f"❌ GATE 3 FAIL: {oi_reason}")
+                    else:
+                        reasons.append(
+                            f"❌ GATE 2 FAIL: Focus PCR={focus_pcr:.2f} ({pcr_bias}). "
+                            f"Bullish flow contradicts PE entry at resistance."
+                        )
             else:
                 reasons.append(
-                    f"⏳ GATE 1 PENDING: Price near Resistance ({resistance}) but "
+                    f"[WAIT] GATE 1 PENDING: Price near Resistance ({resistance}) but "
                     f"sustain not confirmed ({SUSTAIN_TICKS}x 5m candles needed)."
                 )
 
