@@ -202,7 +202,7 @@ def calculate_position_size(capital, entry_premium, sl_premium, lot_size=65, is_
 # ---------------------------------------------------------------------------
 class SignalEngine:
     def evaluate(self, spot_close, support, resistance, focus_pcr, oi_pattern,
-                 spot_history, india_vix=15.0, expiry_date=None, current_date=None):
+                 spot_history, india_vix=15.0, expiry_date=None, current_date=None, scalp_mode=False):
         """
         Three-Gate entry evaluation:
 
@@ -234,11 +234,14 @@ class SignalEngine:
 
         if near_support:
             # --- GATE 1: Sustain Check at Support ---
-            sustained = check_sustain(spot_history, support)
+            required_ticks = 1 if scalp_mode else SUSTAIN_TICKS
+            sustained = check_sustain(spot_history, support, required_ticks=required_ticks)
+            
             if sustained:
+                time_str = "INSTANT TOUCH (Scalp)" if scalp_mode else f"{SUSTAIN_TICKS}x 5m candles"
                 reasons.append(
                     f"✅ GATE 1 PASS: Price ({spot_close:.0f}) sustained near "
-                    f"Support ({support}) for {SUSTAIN_TICKS}x 5m candles."
+                    f"Support ({support}) for {time_str}."
                 )
 
                 # --- GATE 0: VIX Macro Trend Check ---
@@ -270,18 +273,22 @@ class SignalEngine:
                             f"Bearish flow contradicts CE entry at support."
                         )
             else:
+                time_req = "0m" if scalp_mode else f"{SUSTAIN_TICKS}x 5m candles"
                 reasons.append(
                     f"[WAIT] GATE 1 PENDING: Price near Support ({support}) but sustain "
-                    f"not confirmed ({SUSTAIN_TICKS}x 5m candles needed)."
+                    f"not confirmed ({time_req} needed)."
                 )
 
         elif near_resistance:
             # --- GATE 1: Sustain Check at Resistance ---
-            sustained = check_sustain(spot_history, resistance)
+            required_ticks = 1 if scalp_mode else SUSTAIN_TICKS
+            sustained = check_sustain(spot_history, resistance, required_ticks=required_ticks)
+            
             if sustained:
+                time_str = "INSTANT TOUCH (Scalp)" if scalp_mode else f"{SUSTAIN_TICKS}x 5m candles"
                 reasons.append(
                     f"✅ GATE 1 PASS: Price ({spot_close:.0f}) sustained near "
-                    f"Resistance ({resistance}) for {SUSTAIN_TICKS}x 5m candles."
+                    f"Resistance ({resistance}) for {time_str}."
                 )
 
                 # --- GATE 0: VIX Macro Trend Check ---
@@ -313,9 +320,10 @@ class SignalEngine:
                             f"Bullish flow contradicts PE entry at resistance."
                         )
             else:
+                time_req = "0m" if scalp_mode else f"{SUSTAIN_TICKS}x 5m candles"
                 reasons.append(
                     f"[WAIT] GATE 1 PENDING: Price near Resistance ({resistance}) but "
-                    f"sustain not confirmed ({SUSTAIN_TICKS}x 5m candles needed)."
+                    f"sustain not confirmed ({time_req} needed)."
                 )
 
         else:

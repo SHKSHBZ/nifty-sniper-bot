@@ -57,6 +57,7 @@ export default function Dashboard() {
   const [redirectUrl, setRedirectUrl] = useState("");
   const [authLoading, setAuthLoading] = useState(false);
   const [activeTab, setActiveTab] = useState<'control' | 'logs' | 'trades'>('control');
+  const [activeLogBot, setActiveLogBot] = useState<'NIFTY' | 'SENSEX' | 'NIFTY_SCALPER' | 'SENSEX_SCALPER'>('SENSEX_SCALPER');
   const logEndRef = useRef<HTMLDivElement>(null);
 
   // Determine API base URL on client mount
@@ -68,9 +69,9 @@ export default function Dashboard() {
   }, []);
 
   // --- Fetchers (only run when apiBase is set) ---
-  const fetchAll = async (base: string) => {
+  const fetchAll = async (base: string, bot: string) => {
     try {
-      const res = await fetch(`${base}/stats`);
+      const res = await fetch(`${base}/stats/${bot}`);
       if (res.ok) { setStats(await res.json()); setIsConnected(true); }
     } catch { setIsConnected(false); }
 
@@ -85,9 +86,9 @@ export default function Dashboard() {
     } catch {}
   };
 
-  const fetchLogs = async (base: string) => {
+  const fetchLogs = async (base: string, bot: string) => {
     try {
-      const res = await fetch(`${base}/logs/NIFTY`);
+      const res = await fetch(`${base}/logs/${bot}`);
       if (res.ok) { const d = await res.json(); setLogs(d.logs); }
     } catch {}
   };
@@ -95,17 +96,17 @@ export default function Dashboard() {
   // Only start polling once apiBase is ready
   useEffect(() => {
     if (!apiBase) return;
-    fetchAll(apiBase);
-    const i = setInterval(() => fetchAll(apiBase), 3000);
+    fetchAll(apiBase, activeLogBot);
+    const i = setInterval(() => fetchAll(apiBase, activeLogBot), 3000);
     return () => clearInterval(i);
-  }, [apiBase]);
+  }, [apiBase, activeLogBot]);
 
   useEffect(() => {
     if (!apiBase) return;
-    fetchLogs(apiBase);
-    const i = setInterval(() => fetchLogs(apiBase), 3000);
+    fetchLogs(apiBase, activeLogBot);
+    const i = setInterval(() => fetchLogs(apiBase, activeLogBot), 3000);
     return () => clearInterval(i);
-  }, [apiBase]);
+  }, [apiBase, activeLogBot]);
   useEffect(() => { logEndRef.current?.scrollIntoView({ behavior: "smooth" }); }, [logs]);
 
   const toggleBot = async (name: string, isRunning: boolean) => {
@@ -114,7 +115,7 @@ export default function Dashboard() {
     setLoading(prev => ({ ...prev, [name]: true }));
     try {
       await fetch(`${apiBase}/${action}/${name}`, { method: 'POST' });
-      await fetchAll(apiBase);
+      await fetchAll(apiBase, activeLogBot);
     } catch {}
     setLoading(prev => ({ ...prev, [name]: false }));
   };
@@ -171,7 +172,7 @@ export default function Dashboard() {
               }
             </button>
             {/* Refresh */}
-            <button onClick={() => fetchAll(apiBase)} className="p-1.5 rounded-lg bg-white/5 active:scale-90 transition-transform">
+            <button onClick={() => fetchAll(apiBase, activeLogBot)} className="p-1.5 rounded-lg bg-white/5 active:scale-90 transition-transform">
               <RefreshCw className="w-4 h-4" />
             </button>
           </div>
@@ -182,7 +183,7 @@ export default function Dashboard() {
       <section className="px-4 md:px-8 pt-4 md:pt-6">
         <div className="max-w-6xl mx-auto grid grid-cols-3 gap-2 md:gap-4">
           <StatCard 
-            label="Capital" 
+            label={`Capital (${activeLogBot.replace('_SCALPER', ' SCALP')})`} 
             value={`₹${(stats?.capital || 0).toLocaleString('en-IN', {maximumFractionDigits: 0})}`}
             icon={<Shield className="w-4 h-4 md:w-5 md:h-5 text-blue-400" />}
           />
@@ -224,7 +225,7 @@ export default function Dashboard() {
           
           {/* Control Panel */}
           <div className={`md:col-span-1 space-y-3 ${activeTab !== 'control' ? 'hidden md:block' : ''}`}>
-            {["NIFTY", "SENSEX"].map(bot => {
+            {["NIFTY", "SENSEX", "NIFTY_SCALPER", "SENSEX_SCALPER"].map(bot => {
               const s = statuses.find(x => x.name === bot);
               const running = s?.status === 'running';
               return (
@@ -279,6 +280,13 @@ export default function Dashboard() {
               <div className="flex items-center gap-2 p-3 border-b border-white/5 bg-black/20">
                 <Terminal className="w-4 h-4 text-emerald-400" />
                 <span className="text-xs font-bold text-slate-400">Live Logs</span>
+                <div className="flex items-center ml-auto gap-1">
+                   {["NIFTY", "SENSEX", "NIFTY_SCALPER", "SENSEX_SCALPER"].map(b => (
+                     <button key={b} onClick={() => setActiveLogBot(b as any)} className={`text-[10px] px-2 py-1 rounded transition-colors ${activeLogBot === b ? 'bg-blue-600/50 text-white font-bold' : 'bg-white/5 text-slate-400 hover:bg-white/10'}`}>
+                       {b.replace("_SCALPER", " SCALP")}
+                     </button>
+                   ))}
+                </div>
               </div>
               <div className="flex-1 p-3 font-mono text-[11px] leading-relaxed overflow-y-auto bg-black/30">
                 {logs ? logs.split('\n').map((line, i) => (

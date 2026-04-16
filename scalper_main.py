@@ -10,6 +10,9 @@ from data_fetcher import DataFetcher
 from signal_engine import SignalEngine
 from telegram_notifier import TelegramNotifier
 
+# Determine which index is running based on config passed
+index_str = "SENSEX" if (len(sys.argv) > 1 and "sensex" in sys.argv[1].lower()) else "NIFTY"
+
 # Create logs directory
 Path("logs").mkdir(exist_ok=True)
 todays_date = datetime.now().strftime("%Y-%m-%d")
@@ -19,21 +22,18 @@ logging.basicConfig(
     format='%(asctime)s | %(levelname)s | %(message)s',
     datefmt='%H:%M:%S',
     handlers=[
-        logging.FileHandler(f"logs/sniper_bot_{todays_date}.log", encoding="utf-8"),
+        logging.FileHandler(f"logs/scalper_{index_str}_{todays_date}.log", encoding="utf-8"),
         logging.StreamHandler(sys.stdout)
     ]
 )
-logger = logging.getLogger("LiveBot")
+logger = logging.getLogger(f"Scalper_{index_str}")
 
-# Determine which index is running based on config passed
-index_str = "SENSEX" if (len(sys.argv) > 1 and "sensex" in sys.argv[1].lower()) else "NIFTY"
+PORTFOLIO_FILE = Path(f"data/scalper_portfolio_{index_str}.json")
 
-PORTFOLIO_FILE = Path(f"data/paper_portfolio_{index_str}.json")
-
-class LiveOrchestrator:
+class LiveScalperOrchestrator:
     def __init__(self, config_file="project_config.json"):
         print("="*60)
-        print(f"[*] PURE OPTIONS BUYER [LIVE PAPER MODE] | Config: {config_file}")
+        print(f"[*] PURE OPTIONS SCALPER [LIVE PAPER MODE] | Config: {config_file}")
         print("="*60)
         
         self.auth = UpstoxAuth()
@@ -56,8 +56,6 @@ class LiveOrchestrator:
         self.telegram = TelegramNotifier()
         self.load_portfolio()
         
-        # We need Nifty Spot 5m and 15m context for the engine
-        # However, for the Pure Options Buyer without charts, we just pass None for dataframes.
         logger.info("Initializing Data Fetcher. Waiting for first valid chain...")
         while not self.fetcher.is_fresh():
             time.sleep(2)
@@ -68,7 +66,7 @@ class LiveOrchestrator:
             with open(PORTFOLIO_FILE, "r") as f:
                 self.portfolio = json.load(f)
         else:
-            self.portfolio = {"capital": 100000.0, "open_position": None, "trade_history": []}
+            self.portfolio = {"capital": 300000.0, "open_position": None, "trade_history": []}
 
     def save_portfolio(self):
         PORTFOLIO_FILE.parent.mkdir(exist_ok=True)
@@ -76,7 +74,7 @@ class LiveOrchestrator:
             json.dump(self.portfolio, f, indent=4)
 
     def run(self):
-        logger.info("Starting Main Event Loop.")
+        logger.info("Starting Scalper Event Loop.")
         try:
             while True:
                 now = datetime.now()
@@ -92,7 +90,7 @@ class LiveOrchestrator:
 
                 if self.portfolio["open_position"]:
                     self._monitor_position(now)
-                    time.sleep(3) # Turbo query loop: 1 hit per 3s = 0.33/sec (Safe via API)
+                    time.sleep(3) # Turbo query loop: 1 hit per 3s
                 else:
                     self._scan_for_entries(now)
                     sleep_secs = 60 - datetime.now().second
@@ -112,38 +110,37 @@ class LiveOrchestrator:
             if token:
                 pos['instrument_token'] = token
                 self.save_portfolio()
-            else: return # Token missing
+            else: return 
             
-        # Get live premium instantly via 3-second Quotes API
         live_premium = self.fetcher.get_live_quote(token)
         if live_premium <= 0:
-            return # Data error/stale
+            return 
 
-        # 1. Update Trailing Stop Loss if profit hits +15%
-        if live_premium >= pos['entry_price'] * 1.15 and not pos.get('tsl_active'):
+        # 1. Update Trailing Stop Loss if profit hits +4%
+        if live_premium >= pos['entry_price'] * 1.04 and not pos.get('tsl_active'):
             pos['tsl_active'] = True
-            pos['dynamic_sl'] = pos['entry_price'] * 1.02 # Trail to +2% Breakeven
-            logger.info(f"🟢 TRAILING STOP ACTIVATED! SL moved to Breakeven (+2%): Rs.{pos['dynamic_sl']:.2f}")
+            pos['dynamic_sl'] = pos['entry_price'] * 1.01 # Trail to +1% Breakeven + Fees
+            logger.info(f"🟢 SCALPER TSL! SL moved to +1%: Rs.{pos['dynamic_sl']:.2f}")
 
         current_sl = pos.get('dynamic_sl', pos['sl_price'])
         
-        # 2. Check Exits
+        # 2. Check Exits (Scalper time limit = 15m)
         time_held_mins = (now - datetime.fromisoformat(pos['entry_time'])).total_seconds() / 60
-        max_hold = 45 if pos['is_expiry_day'] else 120
+        max_hold = 15 
 
         exit_reason = None
         if live_premium >= pos['target_price']:
-            exit_reason = "TARGET HIT (+Profit)"
+            exit_reason = "⚡ SCALP TARGET HIT"
         elif live_premium <= current_sl:
             exit_reason = "TRAILING STOP" if pos.get('tsl_active') else "HARD STOP LOSS"
         elif time_held_mins >= max_hold:
-            exit_reason = "THETA SHIELD (Time Stop Exceeded)"
+            exit_reason = "THETA SHIELD (15m Scalp Limit Exceeded)"
 
         if exit_reason:
             self._close_position(exit_reason, exit_price=live_premium)
             return
 
-        logger.info(f"Holding Position: {pos['trade_type']} | Live: Rs.{live_premium:.2f} | Time Held: {int(time_held_mins)}m")
+        logger.info(f"Scalp Watch: {pos['trade_type']} | Live: Rs.{live_premium:.2f} | Target: Rs.{pos['target_price']:.2f} | Mins: {int(time_held_mins)}")
 
     def _scan_for_entries(self, now):
         time_str = now.strftime("%H:%M:%S")
@@ -160,50 +157,38 @@ class LiveOrchestrator:
 
         if spot == 0 or sup == 0: return
 
-        # Call Sniper Engine v3.0 (Three-Gate System)
+        # Call SignalEngine with scalp_mode=True
         signal = self.engine.evaluate(
             spot_close=spot, support=sup, resistance=res,
             focus_pcr=focus_pcr, oi_pattern=oi_pattern,
             spot_history=spot_history, india_vix=india_vix,
-            expiry_date=exp, current_date=now.strftime("%Y-%m-%d")
+            expiry_date=exp, current_date=now.strftime("%Y-%m-%d"),
+            scalp_mode=True
         )
 
         if signal['direction']:
             direction = signal['direction']
-            # We enforce Delta > 0.40 rule here
-            # Buy ITM or slightly ATM depending on the wall
             atm_strike = int(round(spot / self.strike_step) * self.strike_step)
-            
-            # Find the best valid strike from the Greeks map
             best_strike = atm_strike
             live_premium = self.fetcher.get_option_ltp(best_strike, direction)
             
-            # Guard: Reject if premium data is missing or zero
             if live_premium <= 0:
-                logger.info(f"Signal Generated ({direction}) but premium for {best_strike} is Rs.{live_premium}. Stale data. Skipping.")
                 return
 
             greeks = self.fetcher.get_strike_greeks(best_strike, direction)
-
             delta = greeks.get('delta', 0)
-            
-            # API Fallback: If Upstox fails to provide Live Greeks for this contract, assume theoretical ATM delta.
-            if delta == 0:
-                delta = 0.50
+            if delta == 0: delta = 0.50
                 
-            if delta < 0.35: # Allowing slight leniency if actual ATM drops dropping live
-                logger.info(f"Signal Generated ({direction}) but ATM Delta is too low ({delta:.2f}). Rejecting.")
-                return
+            if delta < 0.35: return
 
-            # Paper Fill
-            is_expiry = signal['is_expiry_day']
-            sl_pct = 0.20 if is_expiry else 0.30
-            tgt_pct = 0.35 if is_expiry else 0.50
+            # ⚡ Aggressive Scalping Config
+            sl_pct = 0.05  # -5% SL
+            tgt_pct = 0.08 # +8% Target
 
             sl_prem = live_premium * (1 - sl_pct)
             tgt_prem = live_premium * (1 + tgt_pct)
 
-            qty = self.lot_size # Dynamic Lot Size from Config
+            qty = self.lot_size 
 
             self.portfolio["open_position"] = {
                 "entry_time": now.isoformat(),
@@ -214,12 +199,12 @@ class LiveOrchestrator:
                 "qty": qty,
                 "sl_price": sl_prem,
                 "target_price": tgt_prem,
-                "is_expiry_day": is_expiry,
+                "is_expiry_day": signal['is_expiry_day'],
                 "tsl_active": False
             }
             self.save_portfolio()
 
-            msg = (f"🚀 PAPER TRADE ENTERED\n"
+            msg = (f"⚡ SCALPER TRADE ENTERED\n"
                    f"Type: BUY {best_strike} {direction}\n"
                    f"Entry: Rs. {live_premium:.2f}\n"
                    f"Target: Rs. {tgt_prem:.2f} | SL: Rs. {sl_prem:.2f}\n"
@@ -229,8 +214,7 @@ class LiveOrchestrator:
             self.telegram.send_message(msg)
         else:
             reason_summary = signal['reasons'][0] if signal['reasons'] else "No signal"
-            logger.info(f"Scanning... FocusPCR: {focus_pcr:.2f} | S:{sup} R:{res} | Spot: {spot:.0f} | {reason_summary}")
-
+            logger.info(f"Scalp Scanning... PCR: {focus_pcr:.2f} | Spot: {spot:.0f} | {reason_summary}")
 
     def _close_position(self, reason, exit_price=None):
         pos = self.portfolio["open_position"]
@@ -238,8 +222,6 @@ class LiveOrchestrator:
             exit_price = self.fetcher.get_option_ltp(pos['strike'], pos['opt_type'])
             
         pnl = (exit_price - pos['entry_price']) * pos['qty']
-        
-        # Deduct Brokerage (Paper)
         pnl -= 60.0 
         
         self.portfolio["capital"] += pnl
@@ -258,7 +240,7 @@ class LiveOrchestrator:
         self.portfolio["open_position"] = None
         self.save_portfolio()
 
-        msg = (f"🏁 PAPER TRADE CLOSED\n"
+        msg = (f"⚡ SCALP CLOSED\n"
                f"Reason: {reason}\n"
                f"Exit Price: Rs. {exit_price:.2f}\n"
                f"P&L: Rs. {pnl:.2f}\n"
@@ -268,5 +250,5 @@ class LiveOrchestrator:
 
 if __name__ == "__main__":
     target_config = sys.argv[1] if len(sys.argv) > 1 else "project_config.json"
-    bot = LiveOrchestrator(config_file=target_config)
+    bot = LiveScalperOrchestrator(config_file=target_config)
     bot.run()

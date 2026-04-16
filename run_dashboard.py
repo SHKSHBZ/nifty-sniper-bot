@@ -26,7 +26,7 @@ def cleanup():
 def start_backend():
     print("[*] Starting FastAPI Backend...")
     return subprocess.Popen(
-        [sys.executable, "-m", "uvicorn", "backend.server:app", "--host", "0.0.0.0", "--port", "8000"],
+        [sys.executable, "-m", "uvicorn", "backend.server:app", "--host", "0.0.0.0", "--port", "8000", "--reload"],
         cwd=BASE_DIR
     )
 

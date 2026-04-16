@@ -43,7 +43,7 @@ LOG_DIR = BASE_DIR / "logs"
 SESSION_FILE = BASE_DIR / "state" / "upstox_session.json"
 
 # --- Process Tracking ---
-tracked_pids = {"NIFTY": None, "SENSEX": None}
+tracked_pids = {"NIFTY": None, "SENSEX": None, "NIFTY_SCALPER": None, "SENSEX_SCALPER": None}
 
 
 def find_running_bots():
@@ -53,7 +53,12 @@ def find_running_bots():
         try:
             cmdline = proc.info.get('cmdline') or []
             cmd_str = " ".join(cmdline).lower()
-            if 'main.py' in cmd_str and 'python' in cmd_str:
+            if 'scalper_main.py' in cmd_str and 'python' in cmd_str:
+                if 'config_sensex' in cmd_str:
+                    found["SENSEX_SCALPER"] = proc.pid
+                else:
+                    found["NIFTY_SCALPER"] = proc.pid
+            elif 'main.py' in cmd_str and 'python' in cmd_str:
                 if 'config_sensex' in cmd_str:
                     found["SENSEX"] = proc.pid
                 else:
@@ -68,7 +73,7 @@ def find_running_bots():
 def get_status():
     discovered = find_running_bots()
     result = []
-    for name in ["NIFTY", "SENSEX"]:
+    for name in ["NIFTY", "SENSEX", "NIFTY_SCALPER", "SENSEX_SCALPER"]:
         pid = discovered.get(name) or tracked_pids.get(name)
         # Verify pid is still alive
         if pid:
@@ -89,8 +94,8 @@ def get_status():
 @app.post("/start/{bot_type}")
 def start_bot(bot_type: str):
     bot_type = bot_type.upper()
-    if bot_type not in ["NIFTY", "SENSEX"]:
-        raise HTTPException(400, "Use NIFTY or SENSEX")
+    if bot_type not in ["NIFTY", "SENSEX", "NIFTY_SCALPER", "SENSEX_SCALPER"]:
+        raise HTTPException(400, "Invalid bot type")
 
     # Check if already running
     discovered = find_running_bots()
@@ -98,9 +103,14 @@ def start_bot(bot_type: str):
         tracked_pids[bot_type] = discovered[bot_type]
         return {"message": f"{bot_type} already running", "pid": discovered[bot_type]}
 
-    cmd = [sys.executable, str(BASE_DIR / "main.py")]
-    if bot_type == "SENSEX":
-        cmd.append("config_sensex.json")
+    if bot_type == "SENSEX_SCALPER":
+        cmd = [sys.executable, str(BASE_DIR / "scalper_main.py"), "config_sensex.json"]
+    elif bot_type == "NIFTY_SCALPER":
+        cmd = [sys.executable, str(BASE_DIR / "scalper_main.py")]
+    elif bot_type == "SENSEX":
+        cmd = [sys.executable, str(BASE_DIR / "main.py"), "config_sensex.json"]
+    else:
+        cmd = [sys.executable, str(BASE_DIR / "main.py")]
 
     try:
         proc = subprocess.Popen(
@@ -136,12 +146,26 @@ def stop_bot(bot_type: str):
 
 
 # --- Stats ---
-@app.get("/stats")
-def get_stats():
-    if not PORTFOLIO_FILE.exists():
-        return {"capital": 100000, "open_position": None, "trade_history": []}
-    with open(PORTFOLIO_FILE, "r") as f:
-        return json.load(f)
+@app.get("/stats/{bot_type}")
+def get_stats(bot_type: str):
+    bot_type = bot_type.upper()
+    if bot_type == "SENSEX_SCALPER":
+        f = BASE_DIR / "data" / "scalper_portfolio_SENSEX.json"
+        cap = 300000
+    elif bot_type == "NIFTY_SCALPER":
+        f = BASE_DIR / "data" / "scalper_portfolio_NIFTY.json"
+        cap = 300000
+    elif bot_type == "SENSEX":
+        f = BASE_DIR / "data" / "paper_portfolio_SENSEX.json"
+        cap = 100000
+    else:
+        f = BASE_DIR / "data" / "paper_portfolio_NIFTY.json"
+        cap = 100000
+
+    if not f.exists():
+        return {"capital": cap, "open_position": None, "trade_history": []}
+    with open(f, "r") as reader:
+        return json.load(reader)
 
 
 # --- Config ---
@@ -163,7 +187,13 @@ def update_config(config: dict):
 # --- Logs ---
 @app.get("/logs/{bot_type}")
 def get_logs(bot_type: str, lines: int = 100):
-    log_files = sorted(LOG_DIR.glob("sniper_bot_*.log"), reverse=True)
+    if bot_type == "SENSEX_SCALPER":
+        prefix = "scalper_SENSEX_"
+    elif bot_type == "NIFTY_SCALPER":
+        prefix = "scalper_NIFTY_"
+    else:
+        prefix = "sniper_bot_"
+    log_files = sorted(LOG_DIR.glob(f"{prefix}*.log"), reverse=True)
     if not log_files:
         return {"logs": "No log files found. Start the bot to generate logs."}
     try:

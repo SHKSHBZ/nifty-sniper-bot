@@ -45,6 +45,7 @@ class DataFetcher:
         self.vix_history = deque(maxlen=20)
         self.spot_history = deque(maxlen=60)  # 60 readings = ~60 minutes of 1-min spot prices
         self.lock = threading.Lock()
+        self.session = requests.Session()
 
         # Fix: Pre-load VIX historical SMA on startup
         self._preload_vix_history()
@@ -69,7 +70,7 @@ class DataFetcher:
         params = {"instrument_key": self.instrument_key}
         headers = {"Authorization": f"Bearer {self.access_token}", "Accept": "application/json"}
         try:
-            resp = requests.get(url, params=params, headers=headers, timeout=5)
+            resp = self.session.get(url, params=params, headers=headers, timeout=5)
             if resp.status_code == 200:
                 data = resp.json().get("data", [])
                 expiries = {item.get("expiry") for item in data if item.get("expiry")}
@@ -108,7 +109,7 @@ class DataFetcher:
             
             url = f"{self.base_url}/historical-candle/NSE_INDEX%7CINDIA%20VIX/1day/{(datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d')}/{datetime.now().strftime('%Y-%m-%d')}"
             headers = {"Authorization": f"Bearer {self.access_token}", "Accept": "application/json"}
-            resp = requests.get(url, headers=headers, timeout=10)
+            resp = self.session.get(url, headers=headers, timeout=10)
             data = resp.json().get("data", {}).get("candles", [])
             for candle in data[-20:]:
                 self.vix_history.append(candle[4]) # Close price
@@ -140,7 +141,7 @@ class DataFetcher:
             # Exponential Backoff Retry Loop
             max_retries = 3
             for attempt in range(max_retries):
-                resp = requests.get(url, params=params, headers=headers, timeout=10)
+                resp = self.session.get(url, params=params, headers=headers, timeout=10)
                 if resp.status_code == 200:
                     break
                 if resp.status_code == 401:
@@ -256,7 +257,8 @@ class DataFetcher:
             
             today = datetime.now().strftime("%Y-%m-%d")
             timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            csv_path = f"logs/focus_zone_{today}.csv"
+            index_name = self.trading_index.lower()
+            csv_path = f"logs/focus_zone_{index_name}_{today}.csv"
             
             rows = []
             for item in chain:
@@ -474,7 +476,7 @@ class DataFetcher:
         params = {"instrument_key": instrument_key}
         headers = {"Authorization": f"Bearer {self.access_token}", "Accept": "application/json"}
         try:
-            resp = requests.get(url, params=params, headers=headers, timeout=5)
+            resp = self.session.get(url, params=params, headers=headers, timeout=5)
             if resp.status_code == 200:
                 data = resp.json().get("data", {})
                 for k, v in data.items():
