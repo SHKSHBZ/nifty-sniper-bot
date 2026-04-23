@@ -16,10 +16,12 @@ config/
 state/
 
 # Data and Logs
-data/
+# Ignore everything in data/ except CSVs we commit for backtesting samples
+data/*
+!data/*.csv
+!data/.gitkeep
 historical/
 *.log
-*.csv
 *.txt
 
 # AI Conversations
