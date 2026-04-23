@@ -72,15 +72,40 @@ def load_access_token() -> str:
             "\nSteps to fix:\n"
             "  1. Go to https://developer.upstox.com -> Apps -> your app\n"
             "  2. Generate a fresh access token\n"
-            "  3. Create file state/upstox_session.json with:\n"
-            '       { "access_token": "eyJ..." }\n'
+            "  3. Create file state/upstox_session.json — content can be EITHER:\n"
+            "       (a) just the raw token on one line:\n"
+            "             eyJhbGciOi...\n"
+            "       (b) or wrapped in JSON:\n"
+            '             { "access_token": "eyJ..." }\n'
             "  4. Re-run this script.\n"
         )
-    data = json.loads(TOKEN_FILE.read_text())
-    token = data.get("access_token")
-    if not token:
-        raise SystemExit(f"ERROR: 'access_token' missing in {TOKEN_FILE}")
-    return token
+
+    raw = TOKEN_FILE.read_text().strip()
+    if not raw:
+        raise SystemExit(
+            f"ERROR: {TOKEN_FILE} is empty.\n"
+            "Paste a fresh Upstox access token into the file and re-run."
+        )
+
+    # Try JSON first; if that fails, treat the file as a raw token string.
+    try:
+        data = json.loads(raw)
+        token = data.get("access_token") if isinstance(data, dict) else None
+        if not token:
+            raise SystemExit(
+                f"ERROR: 'access_token' key missing in {TOKEN_FILE}\n"
+                'Expected: { "access_token": "eyJ..." }'
+            )
+        return token
+    except json.JSONDecodeError:
+        # Plain-text token (most common cause of the user's earlier error)
+        if raw.startswith("eyJ"):
+            return raw
+        raise SystemExit(
+            f"ERROR: {TOKEN_FILE} is neither valid JSON nor a recognizable token.\n"
+            "Token should start with 'eyJ'. Either paste the raw token or wrap it as JSON.\n"
+            f"First 50 chars seen: {raw[:50]!r}"
+        )
 
 
 def iter_weekly_chunks(from_d: date, to_d: date):
