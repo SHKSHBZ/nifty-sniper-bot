@@ -1,0 +1,154 @@
+{
+  "_meta": {
+    "strategy_name": "VWAP Mean Reversion + OI Wall Confluence (Hybrid)",
+    "version": "0.1-draft",
+    "status": "proposal / not wired into engine yet",
+    "origin": "Refinement of user-proposed VWAP mean reversion spec, retaining existing OI/PCR/VIX edge from signal_engine.py",
+    "notes": [
+      "This file is a spec-only draft. It is NOT loaded by main.py, scalper_main.py or signal_engine.py.",
+      "Intended workflow: (1) review & tune thresholds, (2) backtest in /backtesting, (3) wire a second signal path in signal_engine.py.",
+      "All percentages are decimal fractions unless suffixed _pct."
+    ]
+  },
+
+  "timeframe": "3-Minute",
+  "instruments": ["NIFTY", "BANKNIFTY", "SENSEX"],
+
+  "regime_filters": {
+    "vix_gate": {
+      "ce_entry_requires": "india_vix < 18.0",
+      "pe_entry_requires": "india_vix >= 18.0",
+      "source": "data_fetcher.get_india_vix()"
+    },
+    "trend_gate": {
+      "rule": "block_entries_if ADX(14, 15m) >= 25",
+      "reason": "VWAP mean reversion fails in strongly trending sessions"
+    },
+    "time_window": {
+      "entry_after": "10:00",
+      "entry_before": "14:30",
+      "force_flat": "15:10",
+      "reason": "Avoids opening auction noise and expiry-day close distortions"
+    },
+    "daily_loss_halt": {
+      "threshold_pct_of_capital": 3.0,
+      "action": "halt_new_entries_for_session"
+    },
+    "max_concurrent_positions": 2
+  },
+
+  "indicators": {
+    "vwap": {
+      "type": "session",
+      "reset_time": "09:15",
+      "formula": "cumulative(price * volume) / cumulative(volume)"
+    },
+    "session_range": {
+      "logic": "rolling HoD / LoD since 09:15",
+      "gap_day_freeze_minutes": 45,
+      "gap_day_reason": "HoD/LoD unreliable in first 45m on gap opens"
+    },
+    "atr": {
+      "period": 14,
+      "timeframe": "3m"
+    },
+    "extension_gap": {
+      "formula": "max(0.003 * price, 2 * ATR)",
+      "purpose": "How far from VWAP before a reversion setup becomes valid"
+    }
+  },
+
+  "strike_selection": {
+    "type": "1-strike ITM",
+    "delta_target": [0.55, 0.65],
+    "delta_floor": 0.40,
+    "rounding_rule": "round(spot / strike_interval) * strike_interval",
+    "strike_interval": { "NIFTY": 50, "BANKNIFTY": 100, "SENSEX": 100 },
+    "expiry": "current_weekly",
+    "liquidity_filters": {
+      "max_bid_ask_spread_pct_of_mid": 2.0,
+      "min_open_interest": 10000
+    },
+    "dte_spread_switch": {
+      "trigger": "DTE <= 3",
+      "action": "convert_to_debit_spread",
+      "handler": "spread_executor.py"
+    },
+    "option_type_map": {
+      "long_signal": "CE",
+      "short_signal": "PE"
+    }
+  },
+
+  "entry_conditions": {
+    "long_call_signal": {
+      "location": "low <= LoD * 1.0015 AND price < (VWAP - extension_gap)",
+      "candle_confirmation": [
+        "close > (prev_high + prev_low) / 2",
+        "low > prev_low   (failure_of_lows)"
+      ],
+      "oi_confirmation": "pe_oi_change > 0 at ATM PE strike",
+      "pcr_gate": "focus_pcr > 0.85",
+      "all_gates_required": true
+    },
+    "short_put_signal": {
+      "location": "high >= HoD * 0.9985 AND price > (VWAP + extension_gap)",
+      "candle_confirmation": [
+        "close < (prev_high + prev_low) / 2",
+        "high < prev_high  (failure_of_highs)"
+      ],
+      "oi_confirmation": "ce_oi_change > 0 at ATM CE strike",
+      "pcr_gate": "focus_pcr < 1.10",
+      "all_gates_required": true
+    }
+  },
+
+  "risk_management": {
+    "stop_loss": {
+      "placement": "signal_candle_extreme",
+      "buffer_formula": "max(0.001 * price, 1 * ATR)",
+      "buffer_reason": "2-point fixed buffer from original spec is too tight on 3m Nifty"
+    },
+    "position_sizing": {
+      "formula": "qty_lots = floor((capital * risk_pct) / (sl_premium_points * lot_size))",
+      "risk_pct_per_trade": 0.01,
+      "expiry_day_multiplier": 0.5,
+      "min_lots": 1,
+      "note": "Corrects original spec formula 'Capital / (Risk / SL)' which gave wrong units."
+    },
+    "min_reward_threshold": {
+      "rule": "potential_profit_to_VWAP >= 3 * (round_trip_costs + slippage)",
+      "assumed_round_trip_cost_pct": 0.20,
+      "assumed_slippage_pct": 0.50,
+      "reason": "ATM options have 0.15-0.25% round-trip cost + 0.5% realistic slippage"
+    }
+  },
+
+  "exit_conditions": {
+    "target_1": {
+      "trigger": "price touches VWAP",
+      "action": "exit 50% of position at market"
+    },
+    "target_2": {
+      "trigger": "after target_1 hit",
+      "action": "trail stop to breakeven, ride remainder"
+    },
+    "momentum_exit": {
+      "rule": "two consecutive 3m candles close against trade direction",
+      "reason": "Single-candle exit (original spec) over-fires on normal pullbacks"
+    },
+    "time_exit": {
+      "normal_dte": "120m",
+      "expiry_day_dte": "45m",
+      "source": "matches existing theta shield in main.py"
+    },
+    "hard_stop_always_active": true
+  },
+
+  "open_questions": [
+    "Are 0.3% + 2*ATR the right extension thresholds for BankNifty and SENSEX, or should they be instrument-specific?",
+    "Should trend_gate use 15m ADX or 5m ADX?",
+    "Should we allow this strategy to run ALONGSIDE the OI-wall strategy or only as a fallback when walls are unclear?",
+    "Backtest window: 2 years of 3m data available in /backtesting?"
+  ]
+}
