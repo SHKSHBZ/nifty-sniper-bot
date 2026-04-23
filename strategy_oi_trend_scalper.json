@@ -1,0 +1,123 @@
+{
+  "_meta": {
+    "strategy_name": "OI-Trend-Pullback-Scalper",
+    "version": "1.1-fixed",
+    "origin": "Refinement of user's JSON #3 (Bullish Momentum Launchpad variant, OI-Trend-Magnet-Scalper)",
+    "regime_slot": ["TREND_UP", "TREND_DOWN"],
+    "fixes_applied_vs_v1": [
+      "removed self-contradicting VWAP distance rule",
+      "added bearish mirror (shorts were missing)",
+      "replaced 'green candle + price > EMA9' cold entry with pullback + reclaim pattern",
+      "raised OI bias threshold from 1.20 to 1.50 and restricted to focus zone",
+      "added ADX trend-regime gate and VIX ceiling",
+      "2-candle confirmation for partial exit instead of single candle close",
+      "added time window, position sizing, strike selection, DTE handling, daily risk caps"
+    ]
+  },
+
+  "instrument_scope": ["NIFTY", "BANKNIFTY", "SENSEX"],
+  "timeframe": {
+    "signal": "5-minute",
+    "trend_gate": "15-minute"
+  },
+
+  "data_source_rules": {
+    "trigger_math": "current-month future (nm on DTE<=3)",
+    "strike_chain": "spot"
+  },
+
+  "regime_preconditions": {
+    "classifier_regime_must_be": ["TREND_UP", "TREND_DOWN"],
+    "vix_ceiling": 22,
+    "time_window": {"entry_after": "10:00", "entry_before": "14:30"},
+    "adx_15m_min": 25,
+    "day_range_ratio_min": 1.2,
+    "gap_day_freeze_min": 45,
+    "skip_if_dte_lt": 2,
+    "convert_to_spread_if_dte_lte": 3
+  },
+
+  "indicators": {
+    "ema_fast": 9,
+    "ema_slow": 21,
+    "atr": {"period": 14, "tf": "5m", "source": "future"},
+    "vwap": {"anchor": "09:15 daily", "source": "future"}
+  },
+
+  "sentiment": {
+    "source": "option chain focus zone = ATM ± 3 strikes",
+    "refresh": "5m",
+    "metrics": {
+      "put_oi_change": "Σ ΔOI of PE in focus zone, current vs 5m ago",
+      "call_oi_change": "Σ ΔOI of CE in focus zone"
+    },
+    "bullish_bias": "put_oi_change / call_oi_change >= 1.50 AND put_oi_change >= 500000",
+    "bearish_bias": "call_oi_change / put_oi_change >= 1.50 AND call_oi_change >= 500000"
+  },
+
+  "entry_logic": {
+    "long": {
+      "all_of": [
+        "regime == TREND_UP",
+        "sentiment.bullish_bias == true",
+        "price > VWAP (futures)",
+        "price > EMA9 (futures 5m)",
+        "PULLBACK: low of one of last 3 candles touched or came within 0.1% of EMA9",
+        "RECLAIM: current candle close > prev close AND close > (H+L)/2",
+        "option liquidity: spread <= 2% of mid, OI >= 10000, delta >= 0.45"
+      ]
+    },
+    "short": {
+      "all_of": [
+        "regime == TREND_DOWN",
+        "sentiment.bearish_bias == true",
+        "price < VWAP (futures)",
+        "price < EMA9 (futures 5m)",
+        "PULLBACK: high of one of last 3 candles touched or came within 0.1% of EMA9",
+        "RECLAIM: current candle close < prev close AND close < (H+L)/2",
+        "option liquidity: spread <= 2% of mid, OI >= 10000, delta >= 0.45"
+      ]
+    }
+  },
+
+  "strike_selection": {
+    "type": "1-strike ITM",
+    "delta_target": [0.55, 0.65],
+    "delta_floor": 0.45,
+    "expiry": "current weekly",
+    "strike_rounding": "round(spot / strike_step) * strike_step",
+    "strike_step": {"NIFTY": 50, "BANKNIFTY": 100, "SENSEX": 100},
+    "dte_spread_switch": "convert to 1-wide debit spread if DTE <= 3"
+  },
+
+  "position_sizing": {
+    "risk_pct_per_trade": 1.0,
+    "formula": "qty_lots = floor((capital * 0.01) / (sl_premium_points * lot_size))",
+    "min_lots": 1,
+    "expiry_day_multiplier": 0.5
+  },
+
+  "stop_loss": {
+    "initial": "min(signal_candle_extreme - 1*ATR, recent_swing_low_or_high)",
+    "buffer": "max(0.1% * price, 1 * ATR)",
+    "comment": "Picks the nearer of the two to bound risk; bounded SL keeps sizing stable"
+  },
+
+  "exits": {
+    "partial_50pct_on": "TWO consecutive 5m closes against trade direction below/above EMA9",
+    "breakeven_after_partial": true,
+    "final_exit_any_of": [
+      "price crosses VWAP against trade direction (closed basis)",
+      "sentiment bias flips against position",
+      "time_stop: 90 minutes from entry",
+      "hard_stop_hit: initial SL triggered",
+      "time >= 14:30 (force flat)"
+    ]
+  },
+
+  "daily_halts": {
+    "max_trades": 4,
+    "max_consecutive_losses": 2,
+    "daily_loss_halt_pct": 2.0
+  }
+}

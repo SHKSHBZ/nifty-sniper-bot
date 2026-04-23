@@ -1,0 +1,105 @@
+{
+  "_meta": {
+    "strategy_name": "Bearish Breakdown Launchpad",
+    "version": "1.0",
+    "origin": "Mirror of strategy_bullish_launchpad.json for gap-down days",
+    "regime_slot": "TREND_DOWN_GAP",
+    "asymmetry_notes": [
+      "Bearish breakdowns tend to be faster/sharper than bullish breakouts on Indian indices — slightly tighter 10:15 entry window.",
+      "VIX typically SPIKES on gap-down days; VIX-level gate is more permissive here (25 vs 22) because some VIX expansion is expected and confirms the regime.",
+      "PE options have higher IV crush risk on intraday mean reversion — use 1-ITM PE (delta 0.55-0.65) to cushion."
+    ]
+  },
+
+  "instrument_scope": ["NIFTY", "SENSEX", "BANKNIFTY"],
+  "timeframe": {
+    "opening_range": "09:15-09:30",
+    "entry_window_end": "10:15",
+    "candle_interval": "5m",
+    "force_flat": "14:30"
+  },
+
+  "data_source_rules": {
+    "trigger_math": "current-month future",
+    "or_high_low": "futures 09:15-09:30",
+    "strike_chain": "spot"
+  },
+
+  "pre_conditions": {
+    "gap_down_pct_min": 0.005,
+    "vix_level_max": 25,
+    "vix_chg_15m_max": 0.15,
+    "or_volume_ratio_min": 1.2,
+    "gap_fill_guard": "price at 09:30 must still be < prev_day_close (gap not filled)",
+    "prev_day_confluence_preferred": "OR_low < prev_day_low",
+    "dte_min": 2,
+    "dte_spread_switch": "convert to 1-wide debit PUT spread if DTE <= 3",
+    "action_on_fail": "SKIP_DAY"
+  },
+
+  "entry_logic": {
+    "trigger": "first 5m candle after 09:30 that closes below OR_low",
+    "confirmation": "next 5m candle also closes below OR_low",
+    "breakdown_volume_min": "1.5 * avg OR candle volume",
+    "max_distance_below_OR_low_pct": 0.004,
+    "skip_if_extended": true
+  },
+
+  "strike_selection": {
+    "type": "1-strike ITM Put",
+    "delta_target": [0.55, 0.65],
+    "delta_floor": 0.45,
+    "expiry": "current weekly",
+    "strike_step": {"NIFTY": 50, "BANKNIFTY": 100, "SENSEX": 100},
+    "liquidity": {"max_spread_pct_of_mid": 2.0, "min_open_interest": 10000}
+  },
+
+  "position_sizing": {
+    "risk_pct_per_trade_total": 1.0,
+    "total_qty_formula": "intended_qty_lots = floor((capital * 0.01) / (initial_sl_premium_points * lot_size))",
+    "pyramiding": {
+      "pattern": "inverted_pyramid",
+      "lot_1_trigger": "confirmation candle close below OR_low",
+      "lot_1_size": "50% of intended_qty_lots",
+      "lot_2_trigger": "price <= entry - 0.25*ATR AND lot_1 in profit",
+      "lot_2_size": "30% of intended_qty_lots",
+      "lot_3_trigger": "price <= entry - 0.50*ATR AND lot_2 in profit",
+      "lot_3_size": "20% of intended_qty_lots",
+      "max_adds": 2,
+      "on_each_add": "move SL on all prior lots to breakeven of latest add"
+    }
+  },
+
+  "trailing_stop": {
+    "type": "hybrid",
+    "formula": "min(prev_15m_high + 2pts, EMA9_5m + 0.5*ATR)"
+  },
+
+  "exits": {
+    "failed_breakdown_fast_exit": {
+      "condition": "price closes back above OR_low within 2 candles of lot_1 entry",
+      "action": "EXIT_ALL at market"
+    },
+    "trend_reversal": {
+      "condition": "trailing stop hit",
+      "action": "EXIT_ALL"
+    },
+    "consolidation": {
+      "condition": "range < 0.5*ATR sustained for >= 45 min",
+      "action": "EXIT_ALL at market"
+    },
+    "time_stop": {
+      "condition": "time >= 14:30",
+      "action": "SQUARE_OFF"
+    },
+    "regime_flip": {
+      "condition": "classifier regime flips away from TREND_DOWN_GAP",
+      "action": "EXIT_ALL"
+    }
+  },
+
+  "daily_halts": {
+    "max_launchpad_trades": 1,
+    "daily_loss_halt_pct": 2.0
+  }
+}

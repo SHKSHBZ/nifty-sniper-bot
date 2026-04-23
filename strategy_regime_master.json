@@ -1,0 +1,132 @@
+{
+  "_meta": {
+    "spec_name": "Regime-Switched Options Trading System",
+    "version": "0.1-draft",
+    "status": "design spec — not wired to live execution",
+    "purpose": "Route each trading day's decisions to the tactic whose edge matches the prevailing market regime, instead of running one strategy across all conditions.",
+    "notes": [
+      "All trigger-side math (ATR, VWAP, EMA, OR levels) uses CURRENT-MONTH NIFTY FUTURE.",
+      "Option-side math (strike selection, PCR, OI walls, VIX) uses SPOT.",
+      "On last 3 trading days of current-month future, trigger math rolls to NEXT-MONTH FUTURE.",
+      "Weekly options always reference spot regardless of futures rollover."
+    ]
+  },
+
+  "data_requirements": {
+    "spot": "NSE_INDEX|Nifty 50  (1-minute candles)",
+    "future_cm": "NSE_FO|NIFTY<CM_EXPIRY>FUT  (1-minute candles, volume-bearing)",
+    "future_nm": "NSE_FO|NIFTY<NM_EXPIRY>FUT  (1-minute candles, for rollover weeks)",
+    "vix": "NSE_INDEX|India VIX  (1-minute candles)",
+    "option_chain": "ATM ± 10 strikes, current weekly expiry, 1-minute OHLCV+OI per strike-side",
+    "event_calendar": "static JSON of RBI / Fed / budget / major earnings dates with blackout windows"
+  },
+
+  "regime_classifier": {
+    "runs_every": "5 minutes from 09:30 onwards",
+    "morning_lock_at": "10:15 (first authoritative classification)",
+    "hysteresis_sustain_min": 15,
+    "features": {
+      "gap_pct": "(open_09_15 - prev_day_close) / prev_day_close",
+      "or_range_pct": "(OR_high - OR_low) / OR_mid,  OR = 09:15-09:30 on futures",
+      "adx_15m": "ADX(14) on 15m futures",
+      "range_ratio": "today_range_so_far / avg_20d_range_same_tod",
+      "vwap_slope_30m": "(vwap_now - vwap_30m_ago) / price, futures VWAP",
+      "dist_from_vwap_pct": "abs(price - vwap) / vwap",
+      "vix_level": "spot VIX value",
+      "vix_chg_15m": "(vix_now - vix_15m_ago) / vix_15m_ago",
+      "focus_pcr": "(PE_OI in ATM±3) / (CE_OI in ATM±3)",
+      "focus_oi_bias": "put_oi_change_ratio vs call_oi_change_ratio in focus zone",
+      "dte": "days to nearest weekly expiry",
+      "event_flag": "true if within event blackout window",
+      "prev_day_levels": "prev_day_high, prev_day_low, prev_day_close"
+    },
+    "classification_rules_priority_ordered": [
+      {"label": "NO_TRADE", "condition": "event_flag == true"},
+      {"label": "NO_TRADE", "condition": "vix_level > 28 OR vix_chg_15m > 0.20"},
+      {"label": "WAIT",     "condition": "time < 10:00 AND abs(gap_pct) > 0.005"},
+      {"label": "EXPIRY",   "condition": "dte == 0"},
+      {"label": "TREND_UP_GAP",   "condition": "gap_pct >= 0.005 AND OR_range_pct >= 0.25*avg_OR AND price > OR_high AND vwap_slope_30m > 0"},
+      {"label": "TREND_DOWN_GAP", "condition": "gap_pct <= -0.005 AND OR_range_pct >= 0.25*avg_OR AND price < OR_low AND vwap_slope_30m < 0"},
+      {"label": "TREND_UP",       "condition": "adx_15m >= 25 AND range_ratio >= 1.2 AND vwap_slope_30m > 0 AND price > VWAP"},
+      {"label": "TREND_DOWN",     "condition": "adx_15m >= 25 AND range_ratio >= 1.2 AND vwap_slope_30m < 0 AND price < VWAP"},
+      {"label": "CHOP",           "condition": "adx_15m < 18 AND range_ratio < 0.7 AND dist_from_vwap_pct < 0.0015"},
+      {"label": "RANGE",          "condition": "default fallback"}
+    ],
+    "regime_change_rule": "new label must sustain ≥ 15 min before switching; exception: EXPIRY / NO_TRADE flip immediately"
+  },
+
+  "strategy_router": {
+    "mapping": {
+      "TREND_UP_GAP":   {"tactic": "Bullish Momentum Launchpad",   "spec_file": "strategy_bullish_launchpad.json"},
+      "TREND_DOWN_GAP": {"tactic": "Bearish Breakdown Launchpad",  "spec_file": "strategy_bearish_launchpad.json"},
+      "TREND_UP":       {"tactic": "OI-Trend-Pullback-Scalper (long side)",  "spec_file": "strategy_oi_trend_scalper.json"},
+      "TREND_DOWN":     {"tactic": "OI-Trend-Pullback-Scalper (short side)", "spec_file": "strategy_oi_trend_scalper.json"},
+      "RANGE":          {"tactic": "OI-Wall Mean Reversion (existing bot)",  "spec_file": "signal_engine.py (existing)"},
+      "EXPIRY":         {"tactic": "Debit Spreads only",                     "spec_file": "spread_executor.py (existing)"},
+      "CHOP":           {"tactic": null, "action": "no_trade"},
+      "NO_TRADE":       {"tactic": null, "action": "no_trade"},
+      "WAIT":           {"tactic": null, "action": "no_trade, reclassify every 5m"}
+    },
+    "on_regime_change": {
+      "open_positions": "if regime change is AGAINST the open position's bias, force-exit at market within 1 minute",
+      "pending_orders": "cancel all pending orders",
+      "cooloff_min": 5,
+      "comment": "Prevents carrying a losing trade through a regime flip"
+    }
+  },
+
+  "master_risk_layer": {
+    "per_trade": {
+      "risk_pct_of_capital": 1.0,
+      "sizing_formula": "qty_lots = floor((capital * 0.01) / (sl_premium_points * lot_size))"
+    },
+    "daily": {
+      "loss_halt_pct": 3.0,
+      "action_on_halt": "cancel pending, block new entries, keep managing open positions until close",
+      "max_trades_per_day": 8,
+      "max_consecutive_losses": 3
+    },
+    "portfolio": {
+      "max_concurrent_positions": 2,
+      "max_same_direction_positions": 2,
+      "capital_allocation_across_tactics": "dynamic — one active tactic at a time based on regime"
+    },
+    "time": {
+      "no_entry_before": "10:00",
+      "no_entry_after": "14:30",
+      "force_flat_at": "15:10"
+    },
+    "event_blackout": {
+      "pre_event_min": 30,
+      "post_event_min": 30,
+      "covered_events": ["RBI_policy", "FOMC", "budget", "GDP_release", "CPI_release"]
+    }
+  },
+
+  "data_source_rules": {
+    "trigger_math_source": "current-month Nifty future (rolls to next-month when DTE_fut <= 3)",
+    "strike_and_chain_source": "spot",
+    "vwap_requires_volume": "futures only (spot Nifty has no volume)",
+    "atr_computation": "futures 5m Wilder ATR(14)"
+  },
+
+  "observability": {
+    "classifier_log": "logs/regime_YYYY-MM-DD.jsonl — one row per 5m with all features + label",
+    "router_log": "logs/router_YYYY-MM-DD.jsonl — armed tactic + reason",
+    "risk_log": "logs/risk_YYYY-MM-DD.jsonl — halt events, position changes",
+    "comment": "These logs make post-hoc review possible and are essential for validating the classifier"
+  },
+
+  "integration": {
+    "mode": "dry_run (default) | shadow (logs what it would do alongside live bot) | live",
+    "existing_bot_impact": "none in dry_run/shadow; in live mode, existing signal_engine.py is fired only when router arms RANGE",
+    "feature_flag_env_var": "REGIME_MODE=dry_run|shadow|live"
+  },
+
+  "open_decisions_for_user": [
+    "Confirm hysteresis sustain window (15m vs 10m vs 20m) — affects responsiveness vs whipsaw",
+    "Confirm VIX hard no-trade threshold (28 vs 30) — how conservative on volatility spikes?",
+    "Confirm max trades per day (8) and max consecutive losses (3) for daily halt",
+    "Decide: should CHOP regime run a different tactic (e.g. straddle selling) or stay as NO_TRADE?"
+  ]
+}

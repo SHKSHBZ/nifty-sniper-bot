@@ -1,0 +1,116 @@
+{
+  "_meta": {
+    "strategy_name": "Bullish Momentum Launchpad",
+    "version": "1.1-fixed",
+    "origin": "Refinement of user's JSON #4 (Bullish Momentum Launchpad)",
+    "regime_slot": "TREND_UP_GAP",
+    "fixes_applied_vs_v1": [
+      "clarified trigger vs confirmation (2 consecutive closes above OR high)",
+      "added volume confirmation on breakout",
+      "replaced fixed 50-point pyramid step with 0.25*ATR",
+      "inverted pyramid sizing (largest first) to avoid top-heavy exposure on reversals",
+      "replaced 15m-low trail with hybrid max(15m_low, EMA9-0.5*ATR)",
+      "added failed-breakout fast exit within 2 candles",
+      "aligned EOD force-flat to 14:30 consistent with existing bot",
+      "added DTE gate (>=2) and spread conversion on 0-1 DTE",
+      "converted deployment-% sizing to risk-% sizing",
+      "clarified VIX gate (level AND change)"
+    ]
+  },
+
+  "instrument_scope": ["NIFTY", "SENSEX", "BANKNIFTY"],
+  "timeframe": {
+    "opening_range": "09:15-09:30",
+    "entry_window_end": "10:30",
+    "candle_interval": "5m",
+    "force_flat": "14:30"
+  },
+
+  "data_source_rules": {
+    "trigger_math": "current-month future",
+    "or_high_low": "futures 09:15-09:30",
+    "strike_chain": "spot"
+  },
+
+  "pre_conditions": {
+    "gap_up_pct_min": 0.005,
+    "vix_level_max": 22,
+    "vix_chg_15m_max": 0.10,
+    "or_volume_ratio_min": 1.2,
+    "gap_fill_guard": "price at 09:30 must still be > prev_day_close (gap not filled)",
+    "prev_day_confluence_preferred": "OR_high > prev_day_high  (bonus, not mandatory — gates down pyramid step if absent)",
+    "dte_min": 2,
+    "dte_spread_switch": "convert to 1-wide debit spread if DTE <= 3",
+    "action_on_fail": "SKIP_DAY"
+  },
+
+  "entry_logic": {
+    "trigger": "first 5m candle after 09:30 that closes above OR_high",
+    "confirmation": "next 5m candle also closes above OR_high",
+    "breakout_volume_min": "1.5 * avg OR candle volume",
+    "max_distance_above_OR_high_pct": 0.004,
+    "skip_if_extended": true
+  },
+
+  "strike_selection": {
+    "type": "1-strike ITM Call",
+    "delta_target": [0.55, 0.65],
+    "delta_floor": 0.45,
+    "expiry": "current weekly",
+    "strike_step": {"NIFTY": 50, "BANKNIFTY": 100, "SENSEX": 100},
+    "liquidity": {"max_spread_pct_of_mid": 2.0, "min_open_interest": 10000}
+  },
+
+  "position_sizing": {
+    "risk_pct_per_trade_total": 1.0,
+    "total_qty_formula": "intended_qty_lots = floor((capital * 0.01) / (initial_sl_premium_points * lot_size))",
+    "pyramiding": {
+      "pattern": "inverted_pyramid (biggest first)",
+      "lot_1_trigger": "entry confirmation (2nd candle close above OR_high)",
+      "lot_1_size": "50% of intended_qty_lots",
+      "lot_2_trigger": "price >= entry + 0.25*ATR AND lot_1 in profit",
+      "lot_2_size": "30% of intended_qty_lots",
+      "lot_3_trigger": "price >= entry + 0.50*ATR AND lot_2 in profit",
+      "lot_3_size": "20% of intended_qty_lots",
+      "max_adds": 2,
+      "on_each_add": "move SL on all prior lots to breakeven of latest add"
+    }
+  },
+
+  "trailing_stop": {
+    "type": "hybrid",
+    "formula": "max(prev_15m_low - 2pts, EMA9_5m - 0.5*ATR)",
+    "comment": "Gives noise room but catches real reversals faster than a pure 15m low"
+  },
+
+  "exits": {
+    "failed_breakout_fast_exit": {
+      "condition": "price closes back below OR_high within 2 candles of lot_1 entry",
+      "action": "EXIT_ALL at market",
+      "reason": "failed breakouts are the most expensive trades; exit fast"
+    },
+    "trend_reversal": {
+      "condition": "trailing stop hit (prev 15m low or EMA9-based stop)",
+      "action": "EXIT_ALL"
+    },
+    "consolidation": {
+      "condition": "range < 0.5*ATR sustained for >= 45 min",
+      "action": "EXIT_ALL at market",
+      "reason": "trend has died; theta accumulates"
+    },
+    "time_stop": {
+      "condition": "time >= 14:30",
+      "action": "SQUARE_OFF"
+    },
+    "regime_flip": {
+      "condition": "classifier regime flips away from TREND_UP_GAP",
+      "action": "EXIT_ALL"
+    }
+  },
+
+  "daily_halts": {
+    "max_launchpad_trades": 1,
+    "comment": "Only 1 Launchpad trade per day — once exited, do not re-enter on same OR",
+    "daily_loss_halt_pct": 2.0
+  }
+}
