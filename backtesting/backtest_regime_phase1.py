@@ -235,8 +235,14 @@ def main() -> None:
                     f.write(f"- `{t}` → **{r.value}**\n")
                     prev = r
 
-    print(f"\nLog   : {OUTPUT_LOG.relative_to(ROOT)}")
-    print(f"Report: {OUTPUT_SUMMARY.relative_to(ROOT)}")
+    def _rel(p: Path) -> Path:
+        try:
+            return p.relative_to(ROOT)
+        except ValueError:
+            return p
+
+    print(f"\nLog   : {_rel(OUTPUT_LOG)}")
+    print(f"Report: {_rel(OUTPUT_SUMMARY)}")
 
 
 if __name__ == "__main__":
