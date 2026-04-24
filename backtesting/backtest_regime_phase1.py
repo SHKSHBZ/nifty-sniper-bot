@@ -3,6 +3,8 @@ Phase 1 — Regime classifier smoke test on local spot data.
 
 What this DOES:
   - Loads NIFTY50_INDEX_1minute.csv
+  - If data/INDIA_VIX_1minute.csv is present, uses REAL VIX values per-bar.
+    Otherwise stubs VIX at 15.0 (disables the VIX gate).
   - Resamples to 5m and 15m
   - Walks through each trading day from 09:30 to 14:30
   - Builds ClassifierFeatures and feeds them to RegimeClassifier
@@ -12,9 +14,7 @@ What this DOES NOT DO (requires more data):
   - Does NOT use futures bars — classifier uses spot as a proxy for trigger math.
     Impact: VWAP is imperfect because spot Nifty has volume=0. Reported regimes
     that depend on vwap_slope_30m / dist_from_vwap_pct are best-effort only.
-  - Does NOT use VIX data — vix_level set to 15 (neutral), vix_chg_15m to 0.
-    Impact: NO_TRADE-on-VIX-spike gate is disabled.
-  - Does NOT simulate any trades — no P&L computation. That's Phase 2.
+  - Does NOT simulate any trades — no P&L computation. That's Phase 3.
 
 Usage:
     python backtesting/backtest_regime_phase1.py
@@ -43,6 +43,7 @@ from regime.classifier import (  # noqa: E402
 )
 
 SPOT_CSV = ROOT / "data" / "NIFTY50_INDEX_1minute.csv"
+VIX_CSV = ROOT / "data" / "INDIA_VIX_1minute.csv"
 OUTPUT_LOG = ROOT / "reports" / "regime_phase1_log.jsonl"
 OUTPUT_SUMMARY = ROOT / "reports" / "regime_phase1_summary.md"
 
@@ -57,6 +58,15 @@ def load_spot() -> pd.DataFrame:
     if (df["volume"] == 0).all():
         df = df.copy()
         df["volume"] = 1
+    return df
+
+
+def load_vix() -> pd.DataFrame | None:
+    if not VIX_CSV.exists():
+        return None
+    df = pd.read_csv(VIX_CSV)
+    df["timestamp"] = pd.to_datetime(df["timestamp"])
+    df = df.set_index("timestamp").sort_index()
     return df
 
 
@@ -84,6 +94,7 @@ def build_feature_for_bar(
     day_5m: pd.DataFrame,
     day_15m: pd.DataFrame,
     prev_close: float,
+    vix_1m: pd.DataFrame | None = None,
 ) -> ClassifierFeatures:
     bars_5m_upto_now = day_5m[day_5m.index <= ts]
     bars_15m_upto_now = day_15m[day_15m.index <= ts]
@@ -117,6 +128,17 @@ def build_feature_for_bar(
     today_range = bars_5m_upto_now["high"].max() - bars_5m_upto_now["low"].min()
     range_ratio = today_range / (or_high - or_low) if (or_high - or_low) else 0.0
 
+    # Real VIX lookup if provided
+    vix_level = 15.0
+    vix_chg_15m = 0.0
+    if vix_1m is not None and not vix_1m.empty:
+        vix_upto = vix_1m[vix_1m.index <= ts]
+        if not vix_upto.empty:
+            vix_level = float(vix_upto["close"].iloc[-1])
+            if len(vix_upto) >= 16:  # 15 minutes ago
+                vix_15m_ago = float(vix_upto["close"].iloc[-16])
+                vix_chg_15m = (vix_level - vix_15m_ago) / vix_15m_ago if vix_15m_ago else 0.0
+
     return ClassifierFeatures(
         ts=ts.to_pydatetime(),
         gap_pct=gap_pct,
@@ -130,9 +152,8 @@ def build_feature_for_bar(
         vwap=vwap_now,
         or_high=or_high,
         or_low=or_low,
-        # STUBBED — no VIX data yet
-        vix_level=15.0,
-        vix_chg_15m=0.0,
+        vix_level=vix_level,
+        vix_chg_15m=vix_chg_15m,
         dte=3,
         event_flag=False,
         prev_day_close=prev_close,
@@ -143,8 +164,14 @@ def main() -> None:
     OUTPUT_LOG.parent.mkdir(parents=True, exist_ok=True)
 
     spot_1m = load_spot()
+    vix_1m = load_vix()
     print(f"Loaded {len(spot_1m):,} 1-min spot bars from "
           f"{spot_1m.index.min()} → {spot_1m.index.max()}")
+    if vix_1m is not None:
+        print(f"Loaded {len(vix_1m):,} 1-min VIX bars  "
+              f"(min={vix_1m['close'].min():.2f}, max={vix_1m['close'].max():.2f})")
+    else:
+        print("VIX data NOT found — VIX gate will be stubbed at 15.0")
 
     classifier = RegimeClassifier(ClassifierConfig(sustain_min=15))
 
@@ -170,7 +197,7 @@ def main() -> None:
             if ts.time() > time(14, 30):
                 continue
 
-            feat = build_feature_for_bar(ts, day_5m, day_15m, prev_close)
+            feat = build_feature_for_bar(ts, day_5m, day_15m, prev_close, vix_1m)
             regime = classifier.classify(feat)
 
             day_labels.append((ts.strftime("%H:%M"), regime))
