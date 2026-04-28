@@ -86,15 +86,29 @@ def load_access_token() -> str:
 
 # ------------------------- Expiry generation -------------------------
 
-def weekly_expiries(from_date: date, to_date: date) -> list[date]:
-    """Every Thursday in [from_date, to_date] inclusive."""
+def weekly_expiry_candidates(from_date: date, to_date: date) -> list[date]:
+    """
+    Return candidate dates for Nifty weekly expiry.
+
+    Standard Nifty weekly expiry day is **Tuesday** (post-2024 SEBI changes).
+    On weeks where Tuesday is a public holiday, expiry shifts to Monday
+    (preceding) or Wednesday (following).
+
+    Strategy: emit Tuesday first, then Monday and Wednesday of the same
+    week as fallbacks. The caller queries the contract-list API for each
+    candidate and uses whichever returns a non-empty response — the API
+    is the source of truth, we just need to enumerate plausible dates.
+    """
     out: list[date] = []
+    # Find the Monday on/after from_date
     d = from_date
-    # move to the first Thursday on/after from_date
-    while d.weekday() != 3:  # Mon=0 .. Thu=3
+    while d.weekday() != 0:  # Mon=0
         d += timedelta(days=1)
     while d <= to_date:
-        out.append(d)
+        for offset in (1, 0, 2):  # Tue, Mon, Wed (in priority order)
+            candidate = d + timedelta(days=offset)
+            if from_date <= candidate <= to_date:
+                out.append(candidate)
         d += timedelta(days=7)
     return out
 
@@ -216,11 +230,12 @@ def build_plan(
     strike_step: int,
 ) -> list[Plan]:
     plans: list[Plan] = []
-    expiries = weekly_expiries(from_date, to_date)
-    log.info("Found %d weekly expiries between %s and %s",
-             len(expiries), from_date, to_date)
+    candidates = weekly_expiry_candidates(from_date, to_date)
+    log.info("Generated %d expiry candidates (Tue/Mon/Wed for each week) "
+             "between %s and %s. The contract-list API decides which "
+             "candidates are real expiries.", len(candidates), from_date, to_date)
 
-    for exp in expiries:
+    for exp in candidates:
         # Center strike grid on spot at expiry-week start
         ref = exp - timedelta(days=6)
         spot = load_spot_close_at(ref)
@@ -276,15 +291,26 @@ def run(
     total_skipped = 0
     total_missing = 0
     t_start = time.time()
+    # Track Monday-of-week for weeks we've already found an expiry for —
+    # avoids re-trying Mon/Wed when Tue already succeeded.
+    weeks_with_expiry_found: set[date] = set()
 
     for i, p in enumerate(plans, 1):
-        log.info("[%d/%d] === Expiry %s (ATM~%s) ===",
-                 i, len(plans), p.expiry, p.atm)
+        # Monday-of-week for this candidate
+        monday = p.expiry - timedelta(days=p.expiry.weekday())
+        if monday in weeks_with_expiry_found:
+            continue
+
+        log.info("[%d/%d] === Expiry candidate %s (%s, ATM~%s) ===",
+                 i, len(plans), p.expiry,
+                 ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"][p.expiry.weekday()],
+                 p.atm)
 
         contracts = fetch_contract_list(session, "NSE_INDEX|Nifty 50", p.expiry)
         time.sleep(0.5)
         if not contracts:
             continue
+        weeks_with_expiry_found.add(monday)
 
         # Filter to our strike window + NIFTY only
         if p.min_strike > 0:
