@@ -373,11 +373,43 @@ def summarize(trades: list[Trade], label: str) -> dict:
     }
 
 
-def write_report(baseline: dict, gated: dict, baseline_trades, gated_trades) -> Path:
+def _regime_breakdown(trades: list[Trade]) -> dict[str, dict]:
+    """Net P&L bucketed by regime-at-entry."""
+    buckets: dict[str, list[float]] = defaultdict(list)
+    for t in trades:
+        buckets[t.regime_at_entry.value].append(t.net_pnl)
+    return {
+        r: {"trades": len(v),
+            "net_pnl": sum(v),
+            "wins": len([x for x in v if x > 0])}
+        for r, v in buckets.items()
+    }
+
+
+def _monthly_breakdown(trades: list[Trade]) -> dict[str, dict]:
+    """Net P&L bucketed by year-month of entry."""
+    buckets: dict[str, list[float]] = defaultdict(list)
+    for t in trades:
+        ym = t.entry_ts.strftime("%Y-%m")
+        buckets[ym].append(t.net_pnl)
+    return {
+        m: {"trades": len(v), "net_pnl": sum(v),
+            "wins": len([x for x in v if x > 0])}
+        for m, v in sorted(buckets.items())
+    }
+
+
+def write_report(baseline: dict, gated: dict,
+                 baseline_trades: list[Trade],
+                 gated_trades: list[Trade]) -> Path:
     out = ROOT / "reports" / "phase3_backtest_report.md"
     lines: list[str] = []
+
+    days = sorted({t.day for t in baseline_trades})
     lines.append("# Phase 3 — Mean-Reversion Backtest: Baseline vs Regime-Gated\n")
-    lines.append(f"Period: {SIM_DAYS[0]} to {SIM_DAYS[-1]} ({len(SIM_DAYS)} trading days)\n")
+    if days:
+        lines.append(f"Period: {days[0]} to {days[-1]} "
+                     f"({len(days)} trading days with at least one entry)\n")
     lines.append("Tactic: simplified VWAP-extension mean reversion on ATM options\n")
     lines.append("")
     lines.append(
@@ -406,6 +438,31 @@ def write_report(baseline: dict, gated: dict, baseline_trades, gated_trades) -> 
     for r in sorted(reasons):
         lines.append(f"| {r} | {baseline.get('exit_reasons', {}).get(r, 0)} "
                      f"| {gated.get('exit_reasons', {}).get(r, 0)} |")
+
+    # Per-regime breakdown (baseline only — the gated run by definition only fires in RANGE)
+    lines.append("\n## Baseline P&L Bucketed By Regime At Entry\n")
+    lines.append("Tells us where the baseline bleeds vs where it wins. "
+                 "If TREND_* regimes show heavy losses, that's why gating helps.\n")
+    lines.append("| Regime | Trades | Wins | Net P&L |")
+    lines.append("|---|---:|---:|---:|")
+    rb = _regime_breakdown(baseline_trades)
+    for r in sorted(rb.keys(), key=lambda x: -rb[x]["trades"]):
+        v = rb[r]
+        lines.append(f"| {r} | {v['trades']} | {v['wins']} | "
+                     f"Rs {v['net_pnl']:,.0f} |")
+
+    # Monthly breakdown
+    lines.append("\n## Monthly P&L\n")
+    lines.append("| Month | Baseline trades | Baseline P&L | Gated trades | Gated P&L |")
+    lines.append("|---|---:|---:|---:|---:|")
+    mb = _monthly_breakdown(baseline_trades)
+    mg = _monthly_breakdown(gated_trades)
+    months = sorted(set(mb.keys()) | set(mg.keys()))
+    for m in months:
+        b = mb.get(m, {"trades": 0, "net_pnl": 0})
+        g = mg.get(m, {"trades": 0, "net_pnl": 0})
+        lines.append(f"| {m} | {b['trades']} | Rs {b['net_pnl']:,.0f} "
+                     f"| {g['trades']} | Rs {g['net_pnl']:,.0f} |")
 
     lines.append("\n## Per-Trade Log — Baseline\n")
     lines.append("| Day | Enter | Exit | Reg@Entry | Dir | Strike | "
