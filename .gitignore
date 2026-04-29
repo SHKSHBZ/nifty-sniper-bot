@@ -9,6 +9,7 @@ venv_nifty/
 __pycache__/
 *.py[cod]
 *$py.class
+*.pkl
 
 # Configuration and Secrets
 config.yaml
