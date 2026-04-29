@@ -6,8 +6,9 @@ Question we're answering:
     RANGE regime improve or hurt P&L?
 
 Simulation scope:
-    - 2026-03-24 to 2026-03-30 (4 trading days — the overlap between
-      real spot/VIX data and available option chain).
+    - All trading days where option chain coverage exists.
+      Auto-discovers expiries from data/NIFTY_*_<DD_MMM_YY>_1min.csv files.
+      Each trading day uses the NEXT upcoming weekly expiry's options.
     - Single simplified mean-reversion tactic (not the full 3-gate
       OI-wall logic — but same behavior class: fade extremes back to
       VWAP). Enough to answer the directional question.
@@ -37,8 +38,9 @@ from __future__ import annotations
 import json
 import re
 import sys
+from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import datetime, time
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -65,9 +67,6 @@ from backtesting.backtest_regime_phase1 import (  # noqa: E402
 
 # -------------------------------- Config -------------------------------------
 
-SIM_DAYS = [
-    "2026-03-24", "2026-03-25", "2026-03-27", "2026-03-30",
-]
 EXTENSION_PCT = 0.0025      # 0.25% from VWAP to trigger
 TP_PCT = 0.40
 SL_PCT = 0.25
@@ -82,16 +81,32 @@ MIN_ENTRY_PREMIUM = 20.0   # skip if ATM option too cheap (junk)
 
 
 OPT_FILENAME_RE = re.compile(
-    r"^NIFTY_(\d+)_(CE|PE)_(\d+_[A-Z]+_\d+)_1min\.csv$"
+    r"^NIFTY_(\d+)_(CE|PE)_(\d{2})_([A-Z]{3})_(\d{2})_1min\.csv$"
 )
+MONTH_CODE = {"JAN":1,"FEB":2,"MAR":3,"APR":4,"MAY":5,"JUN":6,
+              "JUL":7,"AUG":8,"SEP":9,"OCT":10,"NOV":11,"DEC":12}
 
 
 # ---------------------------- Option chain loader ----------------------------
 
-def load_option_chain(data_dir: Path) -> dict[tuple[int, str], pd.DataFrame]:
-    """Return mapping (strike, side) -> DataFrame indexed by timestamp."""
+def discover_expiries(data_dir: Path) -> dict[date, list[Path]]:
+    """Group option files by expiry date."""
+    by_expiry: dict[date, list[Path]] = defaultdict(list)
+    for p in data_dir.glob("NIFTY_*_*_1min.csv"):
+        m = OPT_FILENAME_RE.match(p.name)
+        if not m:
+            continue
+        d = date(2000 + int(m.group(5)), MONTH_CODE[m.group(4)], int(m.group(3)))
+        by_expiry[d].append(p)
+    return dict(by_expiry)
+
+
+def load_chain_for_expiry(
+    files: list[Path],
+) -> dict[tuple[int, str], pd.DataFrame]:
+    """Load all (strike, side) DataFrames for one expiry."""
     out: dict[tuple[int, str], pd.DataFrame] = {}
-    for p in sorted(data_dir.glob("NIFTY_*_1min.csv")):
+    for p in files:
         m = OPT_FILENAME_RE.match(p.name)
         if not m:
             continue
@@ -101,6 +116,21 @@ def load_option_chain(data_dir: Path) -> dict[tuple[int, str], pd.DataFrame]:
         df["timestamp"] = pd.to_datetime(df["timestamp"])
         df = df.set_index("timestamp").sort_index()
         out[(strike, side)] = df
+    return out
+
+
+def map_day_to_expiry(
+    trading_days: list[date],
+    expiries: list[date],
+) -> dict[date, date]:
+    """For each trading day, find the next expiry (>= day)."""
+    expiries = sorted(expiries)
+    out: dict[date, date] = {}
+    for d in trading_days:
+        for e in expiries:
+            if e >= d:
+                out[d] = e
+                break
     return out
 
 
@@ -194,20 +224,36 @@ def check_entry_signal(
 def simulate_one_pass(
     spot_1m: pd.DataFrame,
     vix_1m: pd.DataFrame,
-    chain: dict[tuple[int, str], pd.DataFrame],
+    expiries_by_date: dict[date, list[Path]],
     *,
     regime_gated: bool,
 ) -> list[Trade]:
     """
-    Run the simulator over SIM_DAYS. When `regime_gated` is True, entries
-    require the classifier to currently be in RANGE. Otherwise entries
-    are allowed in any regime (the baseline).
+    Run the simulator over every trading day that has matching option
+    chain coverage. For each day, uses the next-upcoming weekly expiry's
+    contracts. When `regime_gated` is True, entries require the classifier
+    to currently be in RANGE. Otherwise entries are allowed in any regime
+    (the baseline).
     """
     classifier = RegimeClassifier(ClassifierConfig(sustain_min=15))
     trades: list[Trade] = []
 
-    for day_str in SIM_DAYS:
-        day = pd.Timestamp(day_str).date()
+    # Trading days available in spot data
+    trading_days = sorted({d for d in spot_1m.index.date})
+    expiries = sorted(expiries_by_date.keys())
+    day_to_expiry = map_day_to_expiry(trading_days, expiries)
+
+    # Cache loaded chains so we don't re-read for every day in the same expiry
+    chain_cache: dict[date, dict] = {}
+
+    for day in trading_days:
+        if day not in day_to_expiry:
+            continue
+        exp = day_to_expiry[day]
+        if exp not in chain_cache:
+            chain_cache[exp] = load_chain_for_expiry(expiries_by_date[exp])
+        chain = chain_cache[exp]
+        day_str = day.isoformat()
         day_1m = spot_1m[spot_1m.index.date == day]
         if day_1m.empty:
             continue
@@ -392,9 +438,13 @@ def write_report(baseline: dict, gated: dict, baseline_trades, gated_trades) -> 
             f"{100*(1-gated['trades']/baseline['trades']):.0f}% reduction.\n"
         )
     lines.append(f"- P&L delta (gated - baseline): **Rs {diff:,.0f}**\n")
-    lines.append("- Sample is only 4 days — no statistical conclusion, "
-                 "but the DIRECTIONAL result shows whether regime gating "
-                 "helps or hurts on this window.\n")
+    n_baseline = baseline.get("trades", 0)
+    if n_baseline >= 30:
+        lines.append("- Sample is **statistically usable** "
+                     f"(n={n_baseline} trades baseline).\n")
+    else:
+        lines.append(f"- Sample is **small** (n={n_baseline} baseline trades) — "
+                     "directional signal only.\n")
 
     out.parent.mkdir(exist_ok=True)
     out.write_text("\n".join(lines))
@@ -406,23 +456,26 @@ def write_report(baseline: dict, gated: dict, baseline_trades, gated_trades) -> 
 def main() -> None:
     spot_1m = load_spot()
     vix_1m = load_vix()
-    chain = load_option_chain(ROOT / "data")
+    expiries_by_date = discover_expiries(ROOT / "data")
     print(f"Loaded spot rows={len(spot_1m):,}  VIX rows={len(vix_1m):,}  "
-          f"option-strikes={len(chain)}")
+          f"expiries={len(expiries_by_date)}")
+    print(f"Spot range: {spot_1m.index.min()} -> {spot_1m.index.max()}")
 
     print("\n=== Baseline (always armed) ===")
-    baseline_trades = simulate_one_pass(spot_1m, vix_1m, chain, regime_gated=False)
+    baseline_trades = simulate_one_pass(
+        spot_1m, vix_1m, expiries_by_date, regime_gated=False)
     baseline = summarize(baseline_trades, "baseline")
     for k, v in baseline.items():
         if k != "exit_reasons":
-            print(f"  {k:<12}  {v}")
+            print(f"  {k:<14}  {v}")
 
     print("\n=== Regime-gated (RANGE only) ===")
-    gated_trades = simulate_one_pass(spot_1m, vix_1m, chain, regime_gated=True)
+    gated_trades = simulate_one_pass(
+        spot_1m, vix_1m, expiries_by_date, regime_gated=True)
     gated = summarize(gated_trades, "regime_gated")
     for k, v in gated.items():
         if k != "exit_reasons":
-            print(f"  {k:<12}  {v}")
+            print(f"  {k:<14}  {v}")
 
     report = write_report(baseline, gated, baseline_trades, gated_trades)
     print(f"\nReport: {report.relative_to(ROOT)}")
