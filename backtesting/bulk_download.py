@@ -90,14 +90,17 @@ def weekly_expiry_candidates(from_date: date, to_date: date) -> list[date]:
     """
     Return candidate dates for Nifty weekly expiry.
 
-    Standard Nifty weekly expiry day is **Tuesday** (post-2024 SEBI changes).
-    On weeks where Tuesday is a public holiday, expiry shifts to Monday
-    (preceding) or Wednesday (following).
+    Nifty weekly expiry day changed over time:
+      - Pre-Nov 2024:   Thursday
+      - Nov 2024 -> ?:  Tuesday  (SEBI consolidation)
+      - On holiday weeks: shifts +/- 1 day
 
-    Strategy: emit Tuesday first, then Monday and Wednesday of the same
-    week as fallbacks. The caller queries the contract-list API for each
+    Strategy: emit candidates in priority order (Tue, Thu, Mon, Wed, Fri)
+    for each week. The caller queries the contract-list API for each
     candidate and uses whichever returns a non-empty response — the API
     is the source of truth, we just need to enumerate plausible dates.
+    Once a non-empty response is found for a week, the caller skips
+    remaining candidates for that same week.
     """
     out: list[date] = []
     # Find the Monday on/after from_date
@@ -105,7 +108,8 @@ def weekly_expiry_candidates(from_date: date, to_date: date) -> list[date]:
     while d.weekday() != 0:  # Mon=0
         d += timedelta(days=1)
     while d <= to_date:
-        for offset in (1, 0, 2):  # Tue, Mon, Wed (in priority order)
+        # Tue first (current rule), Thu (legacy), then Mon/Wed/Fri as fallbacks
+        for offset in (1, 3, 0, 2, 4):  # Tue, Thu, Mon, Wed, Fri
             candidate = d + timedelta(days=offset)
             if from_date <= candidate <= to_date:
                 out.append(candidate)
@@ -120,19 +124,33 @@ def fmt_expiry_for_filename(d: date) -> str:
 
 # ------------------------- Spot price lookup -------------------------
 
+_SPOT_CACHE: Optional[pd.DataFrame] = None
+
+
+def _spot_cached() -> Optional[pd.DataFrame]:
+    global _SPOT_CACHE
+    if _SPOT_CACHE is not None:
+        return _SPOT_CACHE
+    if not SPOT_FILE.exists():
+        return None
+    df = pd.read_csv(SPOT_FILE)
+    df["ts"] = pd.to_datetime(df["timestamp"])
+    _SPOT_CACHE = df
+    return df
+
+
 def load_spot_close_at(reference_date: date) -> Optional[float]:
     """
     Return the close price of NIFTY 50 on the most recent trading day at or
     before `reference_date`. Used to centre the ATM strike grid.
     """
-    if not SPOT_FILE.exists():
+    df = _spot_cached()
+    if df is None or df.empty:
         return None
-    df = pd.read_csv(SPOT_FILE)
-    df["ts"] = pd.to_datetime(df["timestamp"])
-    df = df[df["ts"].dt.date <= reference_date]
-    if df.empty:
+    sub = df[df["ts"].dt.date <= reference_date]
+    if sub.empty:
         return None
-    return float(df.iloc[-1]["close"])
+    return float(sub.iloc[-1]["close"])
 
 
 # ------------------------- API calls -------------------------
@@ -231,9 +249,10 @@ def build_plan(
 ) -> list[Plan]:
     plans: list[Plan] = []
     candidates = weekly_expiry_candidates(from_date, to_date)
-    log.info("Generated %d expiry candidates (Tue/Mon/Wed for each week) "
+    log.info("Generated %d expiry candidates (Tue/Thu/Mon/Wed/Fri per week) "
              "between %s and %s. The contract-list API decides which "
-             "candidates are real expiries.", len(candidates), from_date, to_date)
+             "candidates are real expiries; first match per week wins.",
+             len(candidates), from_date, to_date)
 
     for exp in candidates:
         # Center strike grid on spot at expiry-week start

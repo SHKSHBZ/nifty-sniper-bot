@@ -217,16 +217,33 @@ def main() -> None:
 
     for label, (key, filename) in INSTRUMENTS.items():
         out_path = DATA_DIR / filename
-        df = fetch_instrument(sess, label, key, from_d, to_d)
-        if df.empty:
+        new_df = fetch_instrument(sess, label, key, from_d, to_d)
+        if new_df.empty:
             log.warning("no data for %s — skipping write", label)
             continue
 
-        df.to_csv(out_path, index=False)
-        first_ts = pd.to_datetime(df["timestamp"]).min()
-        last_ts = pd.to_datetime(df["timestamp"]).max()
+        # Merge with existing file if present (so we don't overwrite previously
+        # downloaded ranges when running for a different period).
+        if out_path.exists():
+            existing = pd.read_csv(out_path)
+            existing["timestamp"] = pd.to_datetime(existing["timestamp"])
+            combined = pd.concat([existing, new_df], ignore_index=True)
+            combined = (combined
+                        .drop_duplicates(subset="timestamp")
+                        .sort_values("timestamp")
+                        .reset_index(drop=True))
+            added = len(combined) - len(existing)
+            log.info("merged: existing=%d  new=%d  added=%d  total=%d",
+                     len(existing), len(new_df), added, len(combined))
+            df_out = combined
+        else:
+            df_out = new_df
+
+        df_out.to_csv(out_path, index=False)
+        first_ts = pd.to_datetime(df_out["timestamp"]).min()
+        last_ts = pd.to_datetime(df_out["timestamp"]).max()
         log.info("wrote %s rows=%d  %s -> %s",
-                 out_path.relative_to(ROOT), len(df), first_ts, last_ts)
+                 out_path.relative_to(ROOT), len(df_out), first_ts, last_ts)
 
     log.info("done. Next step: commit data/ via GitHub Desktop and push.")
 
