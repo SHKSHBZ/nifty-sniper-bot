@@ -1,0 +1,111 @@
+# Phase 9 — All Tactics Backtest Comparison
+
+Tactics evaluated on the same 2-year sample, single pass.
+Reference: production OI-Wall MR Phase 4 result was -Rs 53,393 over 159 trades.
+
+## Headline Numbers
+
+| Tactic | Trades | Wins | Win% | Net P&L | Avg Win | Avg Loss | PF | Max DD |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| vwap_hybrid | 9 | 3 | 33.3 | Rs -10,721 | Rs 1,036 | Rs -2,305 | 0.22 | Rs 8,842 |
+| trend_pullback | 32 | 15 | 46.9 | Rs 9,939 | Rs 1,698 | Rs -914 | 1.64 | Rs 4,718 |
+| bullish_orb | 0 | 0 | 0.0 | Rs 0 | Rs 0 | Rs 0 | inf | Rs 0 |
+| bearish_orb | 0 | 0 | 0.0 | Rs 0 | Rs 0 | Rs 0 | inf | Rs 0 |
+
+## Per-Tactic Detail
+
+### vwap_hybrid
+
+- Trades: 9  Wins: 3  Losers: 6
+- Net P&L: Rs -10,721    PF: 0.22
+- Exit reasons: {'EOD': 8, 'TIME_STOP': 1}
+
+  Monthly P&L:
+  | Month | Trades | Net P&L |
+  |---|---:|---:|
+  | 2024-10 | 4 | Rs -10,974 |
+  | 2025-10 | 1 | Rs 859 |
+  | 2025-11 | 1 | Rs 1,677 |
+  | 2026-01 | 2 | Rs -1,619 |
+  | 2026-02 | 1 | Rs -664 |
+
+### trend_pullback
+
+- Trades: 32  Wins: 15  Losers: 17
+- Net P&L: Rs 9,939    PF: 1.64
+- Exit reasons: {'EOD': 21, 'TIME_STOP': 8, 'TP': 2, 'SL': 1}
+
+  Monthly P&L:
+  | Month | Trades | Net P&L |
+  |---|---:|---:|
+  | 2024-09 | 1 | Rs 2,353 |
+  | 2024-11 | 1 | Rs 110 |
+  | 2024-12 | 3 | Rs 2,882 |
+  | 2025-09 | 3 | Rs 2,022 |
+  | 2025-10 | 5 | Rs 1,301 |
+  | 2025-11 | 3 | Rs 868 |
+  | 2025-12 | 5 | Rs -2,398 |
+  | 2026-01 | 6 | Rs 5,601 |
+  | 2026-02 | 5 | Rs -2,800 |
+
+### bullish_orb
+
+  (no trades)
+
+### bearish_orb
+
+  (no trades)
+
+
+## Per-Trade Sample (first 100 of each)
+
+### vwap_hybrid — first 100 trades
+
+| Day | Entry | Exit | Reg | Dir | Strike | Entry₹ | Exit₹ | Reason | Net P&L |
+|---|---|---|---|---|---:|---:|---:|---|---:|
+| 2024-10-04 | 13:45 | 14:30 | TREND_DOWN | CE | 25000 | 259 | 239 | EOD | -2,132 |
+| 2024-10-07 | 13:25 | 14:30 | TREND_DOWN | CE | 24750 | 244 | 198 | EOD | -3,940 |
+| 2024-10-22 | 13:40 | 14:30 | TREND_DOWN | CE | 24550 | 145 | 126 | EOD | -1,809 |
+| 2024-10-25 | 11:00 | 13:00 | RANGE | CE | 24100 | 217 | 182 | TIME_STOP | -3,093 |
+| 2025-10-24 | 14:00 | 14:30 | TREND_DOWN | CE | 25700 | 135 | 152 | EOD | 859 |
+| 2025-11-27 | 13:45 | 14:30 | TREND_DOWN | CE | 26100 | 159 | 187 | EOD | 1,677 |
+| 2026-01-09 | 13:10 | 14:30 | TREND_DOWN | CE | 25650 | 137 | 112 | EOD | -2,193 |
+| 2026-01-23 | 14:00 | 14:30 | TREND_DOWN | CE | 25000 | 163 | 177 | EOD | 573 |
+| 2026-02-25 | 13:10 | 14:30 | TREND_DOWN | CE | 25400 | 203 | 201 | EOD | -664 |
+
+### trend_pullback — first 100 trades
+
+| Day | Entry | Exit | Reg | Dir | Strike | Entry₹ | Exit₹ | Reason | Net P&L |
+|---|---|---|---|---|---:|---:|---:|---|---:|
+| 2024-09-30 | 13:15 | 14:30 | TREND_DOWN | PE | 25900 | 131 | 168 | EOD | 2,353 |
+| 2024-11-12 | 13:25 | 14:30 | TREND_DOWN | PE | 24000 | 126 | 132 | EOD | 110 |
+| 2024-12-10 | 13:10 | 14:30 | TREND_DOWN | PE | 24600 | 158 | 154 | EOD | -763 |
+| 2024-12-13 | 13:35 | 14:30 | TREND_UP | CE | 24650 | 194 | 219 | EOD | 1,317 |
+| 2024-12-17 | 13:10 | 14:30 | TREND_DOWN | PE | 24400 | 127 | 163 | EOD | 2,329 |
+| 2025-09-03 | 14:25 | 14:30 | TREND_UP | CE | 24600 | 165 | 170 | EOD | -80 |
+| 2025-09-04 | 13:35 | 14:30 | TREND_DOWN | PE | 24850 | 109 | 149 | EOD | 2,590 |
+| 2025-09-26 | 14:20 | 14:30 | TREND_DOWN | PE | 24700 | 103 | 100 | EOD | -488 |
+| 2025-10-01 | 13:35 | 14:30 | TREND_UP | CE | 24750 | 156 | 171 | EOD | 716 |
+| 2025-10-15 | 13:30 | 14:30 | TREND_UP | CE | 25300 | 181 | 162 | EOD | -1,867 |
+| 2025-10-16 | 13:00 | 14:30 | TREND_UP | CE | 25450 | 157 | 207 | TIME_STOP | 3,288 |
+| 2025-10-23 | 14:10 | 14:30 | TREND_DOWN | PE | 26000 | 98 | 99 | EOD | -199 |
+| 2025-10-30 | 13:05 | 14:30 | TREND_DOWN | PE | 25950 | 122 | 118 | EOD | -638 |
+| 2025-11-19 | 12:45 | 14:15 | TREND_UP | CE | 26000 | 170 | 178 | TIME_STOP | 201 |
+| 2025-11-20 | 13:50 | 14:30 | TREND_UP | CE | 26150 | 180 | 176 | EOD | -795 |
+| 2025-11-26 | 12:55 | 14:25 | TREND_UP | CE | 26100 | 192 | 219 | TIME_STOP | 1,461 |
+| 2025-12-04 | 13:30 | 14:30 | TREND_DOWN | PE | 26050 | 111 | 110 | EOD | -328 |
+| 2025-12-05 | 12:45 | 14:15 | TREND_UP | CE | 26150 | 130 | 109 | TIME_STOP | -1,903 |
+| 2025-12-12 | 12:50 | 14:20 | TREND_UP | CE | 25950 | 133 | 150 | TIME_STOP | 859 |
+| 2025-12-26 | 12:45 | 14:15 | TREND_DOWN | PE | 26100 | 93 | 90 | TIME_STOP | -491 |
+| 2025-12-31 | 13:05 | 14:30 | TREND_UP | CE | 26100 | 154 | 152 | EOD | -536 |
+| 2026-01-09 | 12:45 | 14:15 | TREND_DOWN | PE | 25700 | 91 | 89 | TIME_STOP | -424 |
+| 2026-01-16 | 12:55 | 13:25 | TREND_DOWN | PE | 25800 | 110 | 164 | TP | 3,738 |
+| 2026-01-16 | 14:00 | 14:30 | TREND_DOWN | PE | 25750 | 127 | 126 | EOD | -483 |
+| 2026-01-23 | 13:00 | 13:30 | TREND_DOWN | PE | 25250 | 110 | 165 | TP | 3,759 |
+| 2026-01-23 | 13:40 | 14:30 | TREND_DOWN | PE | 25100 | 106 | 100 | EOD | -730 |
+| 2026-01-29 | 13:55 | 14:30 | TREND_UP | CE | 25400 | 218 | 222 | EOD | -259 |
+| 2026-02-01 | 13:45 | 14:30 | TREND_DOWN | PE | 25100 | 176 | 209 | EOD | 1,918 |
+| 2026-02-06 | 13:05 | 14:30 | TREND_DOWN | PE | 25600 | 120 | 96 | EOD | -2,118 |
+| 2026-02-20 | 13:55 | 14:30 | TREND_UP | CE | 25550 | 153 | 164 | EOD | 480 |
+| 2026-02-25 | 12:45 | 14:15 | TREND_DOWN | PE | 25500 | 144 | 154 | TIME_STOP | 351 |
+| 2026-02-27 | 12:55 | 14:00 | TREND_DOWN | PE | 25350 | 138 | 97 | SL | -3,431 |
