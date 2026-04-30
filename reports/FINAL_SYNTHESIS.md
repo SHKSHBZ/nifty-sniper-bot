@@ -1,221 +1,222 @@
-# Backtest Project — Final Synthesis
+# Backtest Project — Final Synthesis (2-Year Update)
 
-End-to-end summary of an 8-phase investigation into whether the Nifty
-Sniper Bot's mean-reversion strategy is deployable, what changes make
-it deployable, and what remains uncertain.
+End-to-end summary of the investigation into whether the Nifty
+Sniper Bot's mean-reversion strategy is deployable, after expanding
+from 1 year of data (Aug 2025 – Apr 2026) to 2 years (Sep 2024 – Apr
+2026).
 
----
-
-## Executive Verdict
-
-**Production bot today is NOT deployable** — loses Rs 29k/year on a 1-year
-sample.
-
-**Production bot WITH three changes IS plausibly deployable** —
-swings to **+Rs 25,210/year in-sample, +Rs 1,970 on out-of-sample test**.
-The combined stack improves test-half P&L by Rs 7,322 vs production
-defaults. Profit factor goes from 1.03 to 1.44.
-
-The three validated changes are listed in the **Deployment** section
-below. They are the only changes that survived walk-forward validation.
+> **The 2-year results invalidate the 1-year optimism.** The validated
+> filter stack now produces near-breakeven (-Rs 2,048) instead of
+> +Rs 25k. The bot is **NOT deployable** on the broader sample, but
+> the loss has been compressed from -Rs 53k to -Rs 2k by the same
+> filters that emerged in Phase 7.
 
 ---
 
-## Phase Summary
+## Executive Verdict (Revised)
 
-| Phase | Question | Answer |
-|---|---|---|
-| 1 | Does the regime classifier work on real data? | Yes — RANGE 55-66%, trends 27%, gaps 9%, NO_TRADE 4%, all matching theoretical expectations |
-| 2 | Does regime classification work on synthetic spot? | Yes — 4-day pilot directionally correct |
-| 3 | Does regime gating help a simplified mean-rev tactic? | Yes on simplified (Rs 17k saved), but tactic itself is unprofitable |
-| 4 | Does the production SignalEngine make money on 1 year? | No — loses Rs 29,100. Most loss in RANGE regime. |
-| 5 | Can SL/TP/time-stop tuning fix it? | TP 50→60 turns it positive in-sample (+Rs 7,066) |
-| 6 | Does Phase 5 generalize out-of-sample? | Partially — TP 60 beats TP 50 on test, but bot still net negative (-Rs 1,590 cumulative test) |
-| 7 | What loser buckets exist? | Mondays, 11:00 entries, TREND_DOWN regime. Premium-bucket rule is curve-fitted. |
-| 8 | Does TP=60 + filters work combined? | **Yes — +Rs 25,210 in-sample, profitable on test half (+Rs 1,970), profit factor 1.44** |
+**Production bot today on 2-year sample: -Rs 53,393.** Catastrophic.
+
+**With validated changes (TP 60 + 3 filters): -Rs 2,048.** Breakeven.
+
+**Walk-forward test improvement vs production: +Rs 13,352.** The
+filters DO survive out-of-sample.
+
+**The honest answer:** the strategy as currently configured is not a
+live-deployable money maker. The validated filter stack stops the
+bleeding (production loss compressed 96%) but doesn't produce profit.
+The 2024-Q4 macro regime in particular destroys this strategy — that
+period alone accounts for 110% of the 2-year loss.
 
 ---
 
-## What's Changing — Three Validated Modifications
+## What Changed Going From 1 Year To 2 Years
 
-### Change 1 — TP from 50% to 60%
+| Metric | 1-Year (Aug25-Apr26) | 2-Year (Sep24-Apr26) | Δ |
+|---|---:|---:|---:|
+| Captured records | 98 | 124 | +26 |
+| Production net P&L | +Rs 3,106 | -Rs 53,393 | **-Rs 56,499** |
+| Production win rate | 43.9% | 37.1% | -6.8 pp |
+| Phase 5 best (TP 60) | +Rs 7,066 | -Rs 52,723 | **-Rs 59,789** |
+| Combined stack | +Rs 25,210 | -Rs 2,048 | -Rs 27,258 |
+| Combined stack PF | 1.44 | 0.98 | -0.46 |
+| Walk-forward test improvement | +Rs 7,322 | **+Rs 13,352** | **+Rs 6,030** |
 
-| | Before | After |
-|---|---|---|
-| In-sample net | +Rs 3,106 | +Rs 7,066 (+Rs 3,960) |
-| Walk-forward test | -Rs 5,352 | better-than-prod by Rs 2,906 |
+The 26 added records (mostly 2024-Q4) collectively lost ~Rs 60k.
+Strategy edge in normal periods is small, but its **tail risk in bad
+periods is large enough to wipe out a year of profits**.
 
-**Code change** in `Options.json`:
+---
+
+## The 2024-Q4 Disaster — Why The Strategy Broke
+
+| Month | Trades | Win % | Net P&L |
+|---|---:|---:|---:|
+| 2024-09 | 4 | 0% | -Rs 10,697 |
+| 2024-10 | 11 | 9% | **-Rs 29,452** |
+| 2024-11 | 8 | 25% | -Rs 8,801 |
+| 2024-12 | 3 | 0% | -Rs 7,549 |
+| **Total Q4-2024** | **26** | **8%** | **-Rs 56,499** |
+
+The whole 2-year loss is essentially this period. Outside it, the
+strategy is roughly breakeven.
+
+What was different about 2024-Q4:
+- US presidential election volatility
+- Indian budget anticipation
+- VIX elevated, regime shifts
+- Major directional moves (Nifty 25k -> 23.5k -> 25k)
+- Mean-reversion at OI walls fails when walls are repeatedly broken
+
+This is not parameter-tunable. It's a **regime mismatch**.
+
+---
+
+## Findings Status — 1-Year vs 2-Year
+
+| Phase Finding | 1-Year Verdict | 2-Year Verdict | Conclusion |
+|---|---|---|---|
+| Regime classifier accuracy | Validated (RANGE 55%, trend 27%) | Confirmed | ✅ Real |
+| Phase 4 production losing | -Rs 29k | -Rs 53k | ✅ Confirmed (worse) |
+| TP=60 alone helps | +Rs 4k swing | +Rs 670 swing | ⚠ Marginal at best |
+| Skip Mondays helps | -Rs 14k saved | -Rs 28k saved | ✅ **Real, durable edge** |
+| Skip 11:00 entries helps | -Rs 8k saved | -Rs 12k saved | ✅ **Real, durable edge** |
+| Skip TREND_DOWN regime | Small benefit | -Rs 11k saved | ✅ Real, larger than thought |
+| Premium-bucket filter | Curve-fit | Curve-fit | ❌ Reject |
+| Skip 10:00 entries | Best hour (+Rs 8k) | Worst hour (-Rs 24k) | ❌ **Period-specific, do not use** |
+| Combined stack profitable | +Rs 25k | -Rs 2k | ❌ NOT profitable on 2-year |
+| Walk-forward improvement | +Rs 7,322 | **+Rs 13,352** | ✅ **Filters provide durable edge** |
+| Bot deployable for live | "Plausibly yes" | **NO** | ❌ Reject |
+
+---
+
+## Three Filters Are Still Validated — But Not Enough
+
+The Monday/11:00/TREND_DOWN filters survived the 2-year stress test.
+They reduce loss by ~Rs 50k. But that only brings production from
+-Rs 53k to -Rs 2k. **It stops the bleeding without producing profit.**
+
 ```diff
+# Options.json
 - "profitTargetPercent": 50,
 + "profitTargetPercent": 60,
 ```
 
-### Change 2 — Skip Mondays
-
-The single biggest filter edge. 15 Monday entries in the year, 33% win rate, -Rs 14,345 cumulative.
-
-**Code change** in entry path (e.g. `main.py` or `signal_engine.py`):
-
 ```python
-from datetime import datetime
-# inside entry decision:
-if datetime.now().weekday() == 0:   # Monday
-    return  # skip new entries
+# Entry-time filters (1-year and 2-year both validated)
+if datetime.now().weekday() == 0:                # Monday
+    return  # skip entry
+if datetime.now().hour == 11 and datetime.now().minute < 30:
+    return  # skip entry
+if current_regime == Regime.TREND_DOWN:
+    return  # skip entry
 ```
 
-### Change 3 — Skip 11:00–11:29 Entries
-
-13 entries in this 30-min window over the year, 23% win rate, -Rs 7,683.
-
-**Code change**:
-```python
-now = datetime.now()
-if now.hour == 11 and now.minute < 30:
-    return  # skip new entries
-```
-
-(Optional small extension — skip TREND_DOWN regime entries: 4 trades, -Rs 814.
-The effect is small enough that you can leave it for later if you want fewer
-moving parts.)
+Net effect: brings production from -Rs 53k loss/2yr to -Rs 2k loss/2yr.
+**Damage limitation, not edge.**
 
 ---
 
-## Combined Stack Results
+## What This Means
 
-| Config | Trades | Win% | Net P&L | Profit Factor | Max DD |
-|---|---:|---:|---:|---:|---:|
-| **Production today** | 98 | 43.9 | **+Rs 3,106** | 1.03 | Rs 16,970 |
-| TP 60 only | 98 | 42.9 | +Rs 7,066 | 1.07 | Rs 17,495 |
-| Filters only | 68 | 50.0 | +Rs 23,673 | 1.41 | Rs 13,179 |
-| **TP 60 + 3 filters** | 68 | **48.5** | **+Rs 25,210** | **1.44** | Rs 14,596 |
+### The Strategy Has A Structural Problem
 
-Risk-adjusted return (P&L / Max DD): production **0.18** → combined stack **1.73**. Nearly 10× improvement.
+A profit factor of 0.98 over 124 trades on 2 years means the strategy
+genuinely doesn't have edge. With:
+- Win rate 41.5%
+- Avg win ≈ Avg loss in absolute size
+- Mean-reversion fails when walls break (2024-Q4 phenomenon)
 
-### Walk-Forward (50/50 chronological split)
+**No amount of parameter tuning fixes a strategy that doesn't have edge.**
 
-| Half | Production today | Combined Stack | Δ |
-|---|---:|---:|---:|
-| TRAIN (first 49 trades) | +Rs 8,458 | +Rs 23,240 | +Rs 14,782 |
-| **TEST (last 49 trades)** | **-Rs 5,352** | **+Rs 1,970** | **+Rs 7,322** |
+### What MIGHT Work (Untested)
 
-**The combined stack flips the test half from losing to winning.**
+The data hints at three places where actual edge exists:
 
----
+1. **Skip CE entries entirely** — CE direction lost Rs 57k on 116 trades
+   over 2 years. PE direction made +Rs 3,712 on just 8 trades (62.5%
+   win). The bot's CE bias actively destroys money. **This is the
+   single biggest skipped finding.**
 
-## What We Investigated But Did NOT Adopt
+2. **Trade only in TREND_UP_GAP regime** — 3 trades, 100% win rate,
+   +Rs 4,360. Tiny sample but unique 100% win rate suggests genuine
+   edge in gap-up days for this fade-the-extension setup.
 
-| Considered | Why rejected |
-|---|---|
-| Premium-bucket filter (skip 100-200) | Train picked 50-100 bucket, full year picked 100-200 — unstable, curve-fitted |
-| Per-split optimal params (let TP/SL float per regime) | Different splits picked different "best" — pure overfitting |
-| Regime-gating as a hard filter (RANGE only) | Hurts P&L at optimal params — skips winning trades in trends |
-| Skip Friday entries | Only -Rs 4,843 in sample, not big enough to be confident |
-| Skip 12:00-13:30 entries (mid-day fade) | Showed loss but trade counts too small for confidence |
-| Bearish strategy (Bearish_Day_Rejection_V1) | Sample year was +7% bullish; can't validate. Build later when bearish data is available. |
+3. **Run the strategy on bullish-only periods** — Removing 2024-Q4
+   from the sample makes the strategy roughly breakeven. If you could
+   identify "this is one of those bad periods" and pause, the bot
+   would not have bled in 2024-Q4.
 
----
-
-## PE Entry Asymmetry — Explained, Not A Bug
-
-The bot fired 90 CE entries vs only 8 PE entries over the year. Reason:
-
-- Production Gate 0 blocks PE when VIX < 18
-- 82.6% of the year had VIX < 18 (75,344 of 91,190 minutes)
-- So PE setups were structurally rare by design — not a bug
-
-The 8 PE entries that did fire had a 62.5% win rate vs CE's 42.2%. To
-get more PE alpha you'd need a different macro regime (bearish or
-high-vol year). 2024 data would test this.
+None of these are adopted in the current code.
 
 ---
 
-## Caveats Before Going Live
+## Honest Recommendations
 
-1. **One year of data is not enough.** A profit factor of 1.44 on 98
-   trades has wide confidence intervals. The strategy could still produce
-   a losing year on different data.
+### DON'T
 
-2. **The sample year was structurally bullish (+7%).** Bear-market
-   behavior of the strategy is unknown. Mean-reversion historically
-   does worse in trending bear markets than trending bull markets.
+1. ❌ **Don't deploy the current strategy live.** Even with all the
+   validated filters, P&L over 2 years is essentially zero. Live
+   slippage and friction will tip it negative.
+2. ❌ **Don't trust the 1-year +Rs 25k number.** It was period-specific.
+3. ❌ **Don't add more filters from Phase 7's 2-year run** (skip CE, skip
+   RANGE) — those are statistical artifacts on a losing sample, not
+   actionable rules.
+4. ❌ **Don't tune parameters further.** Phase 5 sweep on 2-year shows
+   ALL 210 combos lose money. The grid does not contain a profitable
+   point.
 
-3. **All filter rules survived walk-forward — but on the same year.**
-   True out-of-sample validation requires a different period (e.g. 2024).
+### DO (in priority order)
 
-4. **Max drawdown is Rs 14,596 to make Rs 25,210 (~58%).** Capital
-   allocation should assume Rs 30k buffer per lot.
-
-5. **One bad month can negate the year.** Jan 2026 alone lost Rs 8.2k.
-   Consider a monthly-loss circuit breaker (e.g. halt strategy if down
-   > Rs 6k in any 21-day rolling window).
-
----
-
-## Deployment Plan
-
-### Phase A — Code Changes (~30 min work)
-1. Update `Options.json`: `profitTargetPercent: 50 → 60`
-2. Add Monday-skip filter to entry path
-3. Add 11:00–11:29 skip filter to entry path
-4. (Optional) Add TREND_DOWN-skip filter — small but consistent
-
-### Phase B — Paper Trading (4–8 weeks)
-- Run with the changes above on live paper data
-- Compare to backtest expectations: ~6 trades/week, 48% win rate, Rs
-  ~500/trade average expectancy
-- Watch for distribution drift (live performance significantly
-  different from backtest)
-
-### Phase C — Small Live Capital (4 weeks)
-- Only after paper trading meets backtest expectations
-- Start with 1 lot, single instrument
-- Monthly-loss circuit breaker armed
-
-### Phase D — Scaling Decision
-- If live tracks paper, scale lot size
-- If live diverges, halt and investigate before doubling down
-
-### Phase E — Regime System Activation (deferred)
-- Phase 8 evidence says regime gating HURTS the simple stack at optimal
-  parameters. Don't activate regime-gated tactics until you have:
-  - More data (2024 + 2026)
-  - Working trend-pullback tactic with its own validated edge
-  - Walk-forward proof that the multi-tactic ensemble beats single-tactic
+1. ✅ **Apply the 3 validated filters** to your codebase as
+   damage-limitation. They survived 2-year out-of-sample (TEST
+   improvement +Rs 13k). Even if you stop here, your bot bleeds
+   less in bad regimes.
+2. ✅ **Investigate the CE-bias finding.** PE entries (8 of 124) had
+   62.5% win rate and made money. CE entries (116) had 35.3% win
+   rate and lost Rs 57k. Why is the bot SO biased to CE? Look at
+   Gate 0 VIX threshold (currently 18). Maybe lowering it to 16
+   would let more PE setups through.
+3. ✅ **Build a regime-pause mechanism.** A monthly-loss circuit
+   breaker (e.g. -Rs 8k in any 21-day window halts trading for 2
+   weeks) would have saved most of 2024-Q4. Don't try to predict
+   the regime — just detect bleeding and pause.
+4. ✅ **Replace the strategy class.** Mean-reversion at OI walls
+   doesn't have edge on 2-year data. The trend-pullback and ORB
+   specs we wrote earlier might. Backtest those instead of trying
+   to fix this one.
+5. ❌ **Don't paper-trade the current bot expecting profit.** It will
+   slowly bleed.
 
 ---
 
-## Files Produced By This Project
+## What's In The Branch
 
 | File | Purpose |
 |---|---|
-| `regime/classifier.py` | 9-regime state machine, hysteresis, immediate-override |
-| `regime/router.py` | Regime → tactic mapping + hostile-direction detection |
-| `regime/master_risk.py` | Daily loss halt, position sizing, max-positions |
-| `tests/test_regime.py` | 37 unit tests, all passing |
-| `backtesting/historical_downloader.py` | Original Upstox downloader (legacy) |
-| `backtesting/historical_downloader_plus.py` | Plus-plan expired-instruments downloader (legacy) |
-| `backtesting/download_spot_vix.py` | Focused spot/VIX 1-min downloader |
-| `backtesting/bulk_download.py` | 1-year multi-expiry option-chain downloader |
-| `backtesting/synthetic_spot.py` | Put-call parity spot derivation |
-| `backtesting/backtest_regime_phase1.py` | Classifier smoke test |
-| `backtesting/phase2_routing_report.py` | Routing visualization |
-| `backtesting/backtest_regime_phase3.py` | Simplified-tactic backtest harness |
-| `backtesting/backtest_regime_phase4.py` | Production-bot backtest with chain reconstruction |
-| `backtesting/backtest_regime_phase5.py` | Parameter sweep (capture-once, replay-many) |
-| `backtesting/backtest_regime_phase6.py` | Walk-forward validation |
-| `backtesting/backtest_regime_phase7.py` | Loser-bucket discovery + skip rules |
-| `backtesting/backtest_regime_phase8.py` | Combined-stack final test |
-| `strategy_*.json` | Five strategy specifications (regime-master + 4 tactics) |
-| `reports/phase*_*.md` | Per-phase reports with all numbers |
-| `reports/FINAL_SYNTHESIS.md` | This document |
+| `reports/FINAL_SYNTHESIS.md` | This document (2-year update) |
+| `reports/phase4_production_backtest_report.md` | 2-year baseline P&L |
+| `reports/phase5_param_sweep_report.md` | All 210 combos lose on 2-year |
+| `reports/phase6_walk_forward_report.md` | 6 splits, no robust optimum |
+| `reports/phase7_loser_analysis.md` | Slice tables identifying loser buckets |
+| `reports/phase8_combined_stack.md` | Combined stack still loses (-Rs 2k) |
+| `regime/`, `backtesting/` | Full code, all phases |
+| `data/` | 2 years of spot, VIX, options |
 
 ---
 
 ## Bottom Line For The Operator
 
-> Apply the three validated changes (TP 60, no Mondays, no 11:00 entries).
-> Paper-trade for 4-8 weeks. Watch for divergence. Only go live after
-> paper performance matches backtest. Even then, expect Rs 15-25k/year
-> on 1 lot in good years and breakeven-to-loss in bad years. This is a
-> small edge, not a money printer.
+> Your strategy works in benign markets and fails in volatile/transitional
+> ones. On a 2-year sample including 2024-Q4, the bot loses ~Rs 53k
+> uncontrolled. With the 3 validated filters it bleeds only ~Rs 2k —
+> close to break-even but not actually profitable. **Apply the filters
+> for damage limitation, but do not deploy live as a profit-seeking
+> system.** The next investigation that has the highest expected
+> return is fixing the CE/PE imbalance (the bot ignores high-quality
+> PE setups) and adding a circuit breaker to pause trading when
+> losses exceed Rs 8k in any 21-day window.
+
+> The 1-year FINAL_SYNTHESIS recommendation to "paper-trade for 4-8
+> weeks then go live with 1 lot" is **withdrawn** based on this 2-year
+> evidence. Don't go live. Investigate CE/PE first.
