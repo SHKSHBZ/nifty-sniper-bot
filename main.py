@@ -2,7 +2,7 @@ import time
 import json
 import sys
 import logging
-from datetime import datetime, date
+from datetime import datetime, date, time as dtime, timedelta
 from pathlib import Path
 
 from upstox_auth import UpstoxAuth
@@ -10,12 +10,16 @@ from data_fetcher import DataFetcher
 from signal_engine import SignalEngine
 from telegram_notifier import TelegramNotifier
 from regime import TacticDispatcher
+from regime.market_hours import (
+    IST, MARKET_OPEN, MARKET_CLOSE, ENTRY_WINDOW_OPEN, FORCE_FLAT_TIME,
+    next_market_open,
+)
 from journal import JournalRecorder, write_daily_report, analyze_trade
 from journal.models import ExecutedTrade
 
 # Create logs directory
 Path("logs").mkdir(exist_ok=True)
-todays_date = datetime.now().strftime("%Y-%m-%d")
+todays_date = datetime.now(IST).strftime("%Y-%m-%d")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -89,10 +93,13 @@ class LiveOrchestrator:
 
     def run(self):
         logger.info("Starting Main Event Loop.")
+        # Wait until the market is open (handles pre-market / post-market /
+        # weekend startups gracefully).
+        self._wait_until_market_open()
         try:
             while True:
-                now = datetime.now()
-                time_str = now.strftime("%H:%M:%S")
+                now = datetime.now(IST)
+                t = now.time()
 
                 # Lazy-start the day's journal once we have a real spot tick
                 self._maybe_start_journal_day(now)
@@ -103,12 +110,12 @@ class LiveOrchestrator:
                     if spot > 0:
                         self.dispatcher.on_spot_tick(now, spot)
 
-                # Force Time Gate exit at 14:30
-                if time_str >= "14:30:00":
+                # Force Time Gate exit at 14:30 IST
+                if t >= FORCE_FLAT_TIME:
                     if self.portfolio["open_position"]:
                         self._close_position("Time Exit (14:30 EOD)")
-                    if time_str >= "15:30:00":
-                        logger.info("Market Closed. Shutting down.")
+                    if t >= MARKET_CLOSE:
+                        logger.info("Market Closed (15:30 IST). Shutting down.")
                         self._finalize_journal_day()
                         break
 
@@ -117,12 +124,60 @@ class LiveOrchestrator:
                     time.sleep(3) # Turbo query loop: 1 hit per 3s = 0.33/sec (Safe via API)
                 else:
                     self._scan_for_entries(now)
-                    sleep_secs = 60 - datetime.now().second
+                    sleep_secs = 60 - datetime.now(IST).second
                     time.sleep(max(1, sleep_secs))
 
         except KeyboardInterrupt:
             logger.info("Bot manually stopped by trader.")
             self._finalize_journal_day()
+
+    # --- Market-time gating -------------------------------------------
+
+    def _wait_until_market_open(self) -> None:
+        """
+        If the bot started before 09:15 IST, sleep until then.
+        If after 15:30 IST or on a weekend, sleep until the next trading
+        day's 09:15 IST. Operator can interrupt with Ctrl+C at any time.
+        """
+        first_print = True
+        while True:
+            now_ist = datetime.now(IST)
+            target = next_market_open(now_ist)
+
+            if target is None:
+                # Inside the trading session right now — proceed immediately
+                if not first_print:
+                    logger.info(
+                        f"Market is open. Continuing event loop "
+                        f"(IST {now_ist.strftime('%H:%M:%S')})."
+                    )
+                return
+
+            secs_to_target = (target - now_ist).total_seconds()
+            if secs_to_target <= 0:
+                return  # safety: target already passed in the time we computed it
+
+            # Sleep in chunks so the operator can Ctrl+C at any time.
+            # Smaller chunks closer to open so we don't oversleep.
+            if secs_to_target > 3600:
+                chunk = 600       # 10-min chunks when far away
+            elif secs_to_target > 600:
+                chunk = 60        # 1-min chunks when within an hour
+            else:
+                chunk = 10        # 10-second chunks when within 10 minutes
+
+            kind = "Weekend" if now_ist.weekday() >= 5 else (
+                "Pre-market" if now_ist.time() < MARKET_OPEN else "Post-market"
+            )
+            logger.info(
+                f"{kind}. Now IST {now_ist.strftime('%a %H:%M:%S')}. "
+                f"Waiting until next open: {target.strftime('%a %Y-%m-%d %H:%M IST')} "
+                f"(in {secs_to_target/60:.0f} min)."
+            )
+            first_print = False
+            time.sleep(min(chunk, secs_to_target))
+
+    # _next_market_open lives in regime/market_hours.py for testability.
 
     def _monitor_position(self, now):
         pos = self.portfolio["open_position"]
@@ -180,8 +235,8 @@ class LiveOrchestrator:
         logger.info(f"Holding Position: {pos['trade_type']} | Live: Rs.{live_premium:.2f} | Time Held: {int(time_held_mins)}m")
 
     def _scan_for_entries(self, now):
-        time_str = now.strftime("%H:%M:%S")
-        if time_str < "10:00:00": return
+        # `now` is already an IST tz-aware datetime supplied by run()
+        if now.time() < ENTRY_WINDOW_OPEN: return
 
         spot = self.fetcher.get_spot()
         sup = self.fetcher.get_support()

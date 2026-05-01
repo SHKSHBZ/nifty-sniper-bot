@@ -226,36 +226,40 @@ class UpstoxAuth:
     
     def save_session(self, token_data):
         """
-        Save session data for reuse
+        Save session data for reuse.
+
+        Upstox access tokens expire at 03:30 IST every day, regardless of
+        when they were generated. We mirror that here so the bot will
+        correctly detect an expired session and trigger fresh_login()
+        instead of silently using a dead token.
         """
         try:
             now = datetime.now(IST)
-            # Upstox tokens usually valid for a day, but check documentation if 'expires_in' is provided
-            # Typically valid until 6:00 AM next day or explicit expiry?
-            # Using safe default of 1 day or next 6 AM
-            
-            next_6am = now.replace(hour=6, minute=0, second=0, microsecond=0)
-            if now.hour >= 6:
-                next_6am += timedelta(days=1)
-            
+
+            # Next 03:30 IST (today's 03:30 if we're before it; otherwise
+            # tomorrow's). Anything from 03:30 onwards expires the next day.
+            next_330 = now.replace(hour=3, minute=30, second=0, microsecond=0)
+            if now.hour > 3 or (now.hour == 3 and now.minute >= 30):
+                next_330 += timedelta(days=1)
+
             session_data = {
                 'access_token': self.access_token,
                 'client_id': self.client_id,
                 'created_at': now.isoformat(),
-                'expires_at': next_6am.isoformat(),
+                'expires_at': next_330.isoformat(),
                 'token_data': token_data, # Store full response just in case
                 'broker': 'UPSTOX',
-                'session_version': '1.0'
+                'session_version': '1.1'
             }
-            
+
             # Ensure state directory exists
             os.makedirs(os.path.dirname(self.session_file), exist_ok=True)
-            
+
             with open(self.session_file, 'w') as f:
                 json.dump(session_data, f, indent=2)
-            
-            print(f"[SAVE] Session saved until: {next_6am.strftime('%Y-%m-%d 06:00:00')}")
-            
+
+            print(f"[SAVE] Session saved until: {next_330.strftime('%Y-%m-%d 03:30 IST')}")
+
         except Exception as e:
             print(f"[FAIL] Failed to save session: {e}")
     
