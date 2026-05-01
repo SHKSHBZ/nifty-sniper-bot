@@ -21,7 +21,9 @@ from dataclasses import dataclass, field
 from datetime import time
 from typing import Optional
 
-from tactics.base import Tactic, TacticConfig, TacticState, TacticSignal
+from tactics.base import (
+    Tactic, TacticConfig, TacticState, TacticSignal, GateResult,
+)
 
 
 @dataclass
@@ -165,3 +167,98 @@ class VWAPHybridTactic(Tactic):
                     f"pcr={s.focus_pcr:.2f}, ce_oi+={s.ce_oi_change:.0f}, "
                     f"vix={s.vix_level:.1f}"),
         )
+
+    # ------------------------------------------------------------------
+    # Diagnostic gates — used by the journal to detect near-misses
+    # ------------------------------------------------------------------
+    def gates_for_direction(
+        self, s: TacticState, direction: str
+    ) -> dict[str, GateResult]:
+        cfg = self.config
+        ext_gap = max(cfg.extension_pct_min * s.spot, cfg.atr_multiplier * s.atr_5m)
+
+        gates: dict[str, GateResult] = {}
+        # Common
+        gates["dte_ok"] = GateResult(
+            s.dte >= cfg.dte_min, s.dte, cfg.dte_min,
+            f"DTE {s.dte} >= {cfg.dte_min}",
+        )
+        gates["atr_positive"] = GateResult(
+            s.atr_5m > 0, s.atr_5m, 0.0,
+            f"ATR {s.atr_5m:.1f}",
+        )
+        gates["session_window"] = GateResult(
+            cfg.no_entry_before <= s.ts.time() < cfg.no_entry_after,
+            s.ts.time().isoformat(timespec='minutes'),
+            f"{cfg.no_entry_before}-{cfg.no_entry_after}",
+        )
+
+        if direction == "CE":
+            gates["vix_ok_for_CE"] = GateResult(
+                s.vix_level < cfg.vix_max_for_ce, s.vix_level, cfg.vix_max_for_ce,
+                f"VIX {s.vix_level:.2f} < {cfg.vix_max_for_ce}",
+            )
+            gates["pcr_ok_for_CE"] = GateResult(
+                s.focus_pcr > cfg.pcr_bullish_lower_bound,
+                s.focus_pcr, cfg.pcr_bullish_lower_bound,
+                f"focus PCR {s.focus_pcr:.2f} > {cfg.pcr_bullish_lower_bound}",
+            )
+            gates["pe_oi_buildup"] = GateResult(
+                s.pe_oi_change > 0, s.pe_oi_change, 0,
+                f"PE OI Δ {s.pe_oi_change:+.0f} > 0",
+            )
+            gates["price_extended_below_vwap"] = GateResult(
+                s.spot < (s.vwap - ext_gap), s.spot - s.vwap, -ext_gap,
+                f"spot − vwap = {s.spot - s.vwap:+.1f} < −{ext_gap:.1f}",
+            )
+            if s.day_low > 0:
+                dist = abs(s.bar_low - s.day_low) / s.spot
+                gates["lod_proximity"] = GateResult(
+                    dist <= cfg.lod_proximity_pct, dist, cfg.lod_proximity_pct,
+                    f"bar.low {s.bar_low:.0f} within {cfg.lod_proximity_pct*100:.2f}% of LoD {s.day_low:.0f}",
+                )
+            if s.prev_bar_high > 0 and s.prev_bar_low > 0:
+                prev_mid = (s.prev_bar_high + s.prev_bar_low) / 2
+                gates["reclaim_close"] = GateResult(
+                    s.bar_close > prev_mid, s.bar_close, prev_mid,
+                    f"close {s.bar_close:.0f} > prev mid {prev_mid:.0f}",
+                )
+                gates["failure_of_lows"] = GateResult(
+                    s.bar_low > s.prev_bar_low, s.bar_low, s.prev_bar_low,
+                    f"bar.low {s.bar_low:.0f} > prev.low {s.prev_bar_low:.0f}",
+                )
+        else:  # PE
+            gates["vix_ok_for_PE"] = GateResult(
+                s.vix_level >= cfg.vix_min_for_pe, s.vix_level, cfg.vix_min_for_pe,
+                f"VIX {s.vix_level:.2f} >= {cfg.vix_min_for_pe}",
+            )
+            gates["pcr_ok_for_PE"] = GateResult(
+                s.focus_pcr < cfg.pcr_bearish_upper_bound,
+                s.focus_pcr, cfg.pcr_bearish_upper_bound,
+                f"focus PCR {s.focus_pcr:.2f} < {cfg.pcr_bearish_upper_bound}",
+            )
+            gates["ce_oi_buildup"] = GateResult(
+                s.ce_oi_change > 0, s.ce_oi_change, 0,
+                f"CE OI Δ {s.ce_oi_change:+.0f} > 0",
+            )
+            gates["price_extended_above_vwap"] = GateResult(
+                s.spot > (s.vwap + ext_gap), s.spot - s.vwap, ext_gap,
+                f"spot − vwap = {s.spot - s.vwap:+.1f} > +{ext_gap:.1f}",
+            )
+            if s.day_high > 0:
+                dist = abs(s.day_high - s.bar_high) / s.spot
+                gates["hod_proximity"] = GateResult(
+                    dist <= cfg.lod_proximity_pct, dist, cfg.lod_proximity_pct,
+                    f"bar.high {s.bar_high:.0f} within {cfg.lod_proximity_pct*100:.2f}% of HoD {s.day_high:.0f}",
+                )
+            if s.prev_bar_high > 0 and s.prev_bar_low > 0:
+                prev_mid = (s.prev_bar_high + s.prev_bar_low) / 2
+                gates["reclaim_close"] = GateResult(
+                    s.bar_close < prev_mid, s.bar_close, prev_mid,
+                    f"close {s.bar_close:.0f} < prev mid {prev_mid:.0f}",
+                )
+                gates["failure_of_highs"] = GateResult(
+                    s.bar_high < s.prev_bar_high, s.bar_high, s.prev_bar_high,
+                    f"bar.high {s.bar_high:.0f} < prev.high {s.prev_bar_high:.0f}",
+                )
+        return gates

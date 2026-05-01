@@ -24,7 +24,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
-from tactics.base import Tactic, TacticConfig, TacticState, TacticSignal
+from tactics.base import (
+    Tactic, TacticConfig, TacticState, TacticSignal, GateResult,
+)
 
 
 @dataclass
@@ -155,6 +157,112 @@ class TrendPullbackTactic(Tactic):
         )
 
     # ------------------------------------------------------------------
+
+    # ------------------------------------------------------------------
+    # Diagnostic gates
+    # ------------------------------------------------------------------
+
+    def gates_for_direction(
+        self, s: TacticState, direction: str
+    ) -> dict[str, GateResult]:
+        cfg = self.config
+        gates: dict[str, GateResult] = {}
+
+        gates["dte_ok"] = GateResult(
+            s.dte >= cfg.dte_min, s.dte, cfg.dte_min,
+            f"DTE {s.dte} >= {cfg.dte_min}",
+        )
+        gates["session_window"] = GateResult(
+            cfg.no_entry_before <= s.ts.time() < cfg.no_entry_after,
+            s.ts.time().isoformat(timespec='minutes'),
+            f"{cfg.no_entry_before}-{cfg.no_entry_after}",
+        )
+        gates["vix_ok"] = GateResult(
+            s.vix_level < cfg.vix_max, s.vix_level, cfg.vix_max,
+            f"VIX {s.vix_level:.2f} < {cfg.vix_max}",
+        )
+        gates["adx_strong"] = GateResult(
+            s.adx_15m >= cfg.adx_min_15m, s.adx_15m, cfg.adx_min_15m,
+            f"ADX(15m) {s.adx_15m:.1f} >= {cfg.adx_min_15m}",
+        )
+
+        if direction == "CE":
+            gates["regime_is_TREND_UP"] = GateResult(
+                s.regime == "TREND_UP", s.regime, "TREND_UP",
+                f"regime={s.regime}",
+            )
+            ratio = s.pe_oi_change / s.ce_oi_change if s.ce_oi_change > 0 else 0.0
+            gates["oi_bias_ratio"] = GateResult(
+                ratio >= cfg.oi_bias_ratio_min, ratio, cfg.oi_bias_ratio_min,
+                f"PE/CE OI Δ ratio {ratio:.2f} >= {cfg.oi_bias_ratio_min}",
+            )
+            gates["oi_bias_magnitude"] = GateResult(
+                s.pe_oi_change >= cfg.oi_bias_magnitude_min,
+                s.pe_oi_change, cfg.oi_bias_magnitude_min,
+                f"PE OI Δ {s.pe_oi_change:.0f} >= {cfg.oi_bias_magnitude_min:.0f}",
+            )
+            gates["price_above_vwap"] = GateResult(
+                s.spot > s.vwap, s.spot, s.vwap,
+                f"spot {s.spot:.0f} > vwap {s.vwap:.0f}",
+            )
+            gates["price_above_ema9"] = GateResult(
+                s.spot > s.ema9_5m, s.spot, s.ema9_5m,
+                f"spot {s.spot:.0f} > ema9 {s.ema9_5m:.0f}",
+            )
+            gates["pullback_to_ema9"] = GateResult(
+                self._pullback_to_ema9(s, cfg, "long"),
+                "yes" if self._pullback_to_ema9(s, cfg, "long") else "no",
+                "yes",
+                "low touched/within proximity of EMA9 in last 3 bars",
+            )
+            gates["reclaim_close_gt_prev"] = GateResult(
+                s.bar_close > s.prev_bar_close, s.bar_close, s.prev_bar_close,
+                f"close {s.bar_close:.0f} > prev close {s.prev_bar_close:.0f}",
+            )
+            mid = (s.bar_high + s.bar_low) / 2
+            gates["close_above_midpoint"] = GateResult(
+                s.bar_close > mid, s.bar_close, mid,
+                f"close {s.bar_close:.0f} > bar mid {mid:.0f}",
+            )
+        else:  # PE
+            gates["regime_is_TREND_DOWN"] = GateResult(
+                s.regime == "TREND_DOWN", s.regime, "TREND_DOWN",
+                f"regime={s.regime}",
+            )
+            ratio = s.ce_oi_change / s.pe_oi_change if s.pe_oi_change > 0 else 0.0
+            gates["oi_bias_ratio"] = GateResult(
+                ratio >= cfg.oi_bias_ratio_min, ratio, cfg.oi_bias_ratio_min,
+                f"CE/PE OI Δ ratio {ratio:.2f} >= {cfg.oi_bias_ratio_min}",
+            )
+            gates["oi_bias_magnitude"] = GateResult(
+                s.ce_oi_change >= cfg.oi_bias_magnitude_min,
+                s.ce_oi_change, cfg.oi_bias_magnitude_min,
+                f"CE OI Δ {s.ce_oi_change:.0f} >= {cfg.oi_bias_magnitude_min:.0f}",
+            )
+            gates["price_below_vwap"] = GateResult(
+                s.spot < s.vwap, s.spot, s.vwap,
+                f"spot {s.spot:.0f} < vwap {s.vwap:.0f}",
+            )
+            gates["price_below_ema9"] = GateResult(
+                s.spot < s.ema9_5m, s.spot, s.ema9_5m,
+                f"spot {s.spot:.0f} < ema9 {s.ema9_5m:.0f}",
+            )
+            gates["pullback_to_ema9"] = GateResult(
+                self._pullback_to_ema9(s, cfg, "short"),
+                "yes" if self._pullback_to_ema9(s, cfg, "short") else "no",
+                "yes",
+                "high touched/within proximity of EMA9 in last 3 bars",
+            )
+            gates["reclaim_close_lt_prev"] = GateResult(
+                s.bar_close < s.prev_bar_close, s.bar_close, s.prev_bar_close,
+                f"close {s.bar_close:.0f} < prev close {s.prev_bar_close:.0f}",
+            )
+            mid = (s.bar_high + s.bar_low) / 2
+            gates["close_below_midpoint"] = GateResult(
+                s.bar_close < mid, s.bar_close, mid,
+                f"close {s.bar_close:.0f} < bar mid {mid:.0f}",
+            )
+        return gates
 
     @staticmethod
     def _pullback_to_ema9(

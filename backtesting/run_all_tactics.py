@@ -85,6 +85,23 @@ class TacticTrade:
         self.net_pnl = self.gross_pnl - (BROKERAGE_PER_LEG * 2)
 
 
+@dataclass
+class NearMiss:
+    """A bar where exactly one gate blocked an entry."""
+    tactic: str
+    direction: str
+    ts: pd.Timestamp
+    blocked_by: str
+    blocker_detail: str
+    hypothetical_strike: int
+    hypothetical_entry_premium: float = 0.0
+    hypothetical_exit_premium: float = 0.0
+    hypothetical_exit_reason: str = ""
+    hypothetical_pnl: float = 0.0
+    hypothetical_outcome: str = ""   # WIN / LOSS / BREAKEVEN / UNKNOWN
+    regime_at_ts: str = ""
+
+
 class TacticRunner:
     """Per-tactic position manager and trade log."""
 
@@ -93,6 +110,7 @@ class TacticRunner:
         self.tactic = tactic
         self.trades: list[TacticTrade] = []
         self.open_trade: Optional[TacticTrade] = None
+        self.near_misses: list[NearMiss] = []
 
     # ----- per-bar step ----------------------------------------------------
 
@@ -122,12 +140,121 @@ class TacticRunner:
         # 3) Evaluate tactic
         sig = self.tactic.evaluate(state)
         if sig is None:
+            # No fire — check if it was a near-miss (exactly one gate blocked).
+            # Skip if we're already in a position (entry path is guarded anyway).
+            if self.open_trade is None:
+                self._check_near_miss(ts, state, chain, spot_close)
             return
         if sig.action == "enter" and self.open_trade is None:
             self._open_trade(ts, sig, chain, spot_close, state.regime)
         elif sig.action == "add_lot" and self.open_trade is not None:
             # Pyramiding: simply increment lot count (simple model)
             self.open_trade.pyramid_lots += 1
+
+    # ----- near-miss diagnostics ----------------------------------------
+
+    def _check_near_miss(
+        self,
+        ts: pd.Timestamp,
+        state: TacticState,
+        chain: dict,
+        spot_close: float,
+    ) -> None:
+        # Quick guards: entry-time window, otherwise tactics block trivially
+        # and would produce many false near-misses.
+        if not (state.ts.time() >= self.tactic.config.no_entry_before
+                and state.ts.time() < self.tactic.config.no_entry_after):
+            return
+
+        for direction in ("CE", "PE"):
+            gates = self.tactic.gates_for_direction(state, direction)
+            if not gates:
+                continue
+            failed = [name for name, g in gates.items() if not g.passed]
+            if len(failed) != 1:
+                continue
+            blocker_name = failed[0]
+            blocker = gates[blocker_name]
+            atm = int(round(spot_close / STRIKE_STEP) * STRIKE_STEP)
+            offset = self.tactic.config.__dict__.get("strike_offset", 0)
+            if direction == "CE":
+                strike = atm - offset * STRIKE_STEP
+            else:
+                strike = atm + offset * STRIKE_STEP
+            nm = NearMiss(
+                tactic=self.name,
+                direction=direction,
+                ts=ts,
+                blocked_by=blocker_name,
+                blocker_detail=blocker.detail(),
+                hypothetical_strike=strike,
+                regime_at_ts=state.regime,
+            )
+            # Lookup hypothetical option price + simulate exit
+            self._populate_hypothetical(nm, chain, ts)
+            self.near_misses.append(nm)
+
+    def _populate_hypothetical(
+        self,
+        nm: NearMiss,
+        chain: dict,
+        ts: pd.Timestamp,
+    ) -> None:
+        df = chain.get((nm.hypothetical_strike, nm.direction))
+        if df is None:
+            nm.hypothetical_outcome = "UNKNOWN"
+            return
+        try:
+            entry_row = df.loc[ts]
+        except KeyError:
+            window = df.loc[ts - pd.Timedelta(minutes=2):ts]
+            if window.empty:
+                nm.hypothetical_outcome = "UNKNOWN"
+                return
+            entry_row = window.iloc[-1]
+        if isinstance(entry_row, pd.DataFrame):
+            entry_row = entry_row.iloc[0]
+        entry_premium = float(entry_row["close"])
+        if entry_premium < MIN_ENTRY_PREMIUM:
+            nm.hypothetical_outcome = "UNKNOWN"
+            return
+        nm.hypothetical_entry_premium = entry_premium
+
+        # Walk through to end of day or 14:30, simulating with 30%/50%/120m
+        eff_entry = entry_premium * (1 + SLIPPAGE)
+        tp = entry_premium * 1.50
+        sl = entry_premium * 0.70
+        eod = pd.Timestamp.combine(ts.date(), time(14, 30)).tz_localize(ts.tz)
+        path = df.loc[ts:eod]
+        exit_premium = float(path.iloc[-1]["close"]) if len(path) else entry_premium
+        exit_reason = "EOD"
+        for i, (idx, row) in enumerate(path.iterrows()):
+            if i == 0:
+                continue
+            elapsed = (idx - ts).total_seconds() / 60
+            if float(row["high"]) >= tp:
+                exit_premium = tp
+                exit_reason = "TP"
+                break
+            if float(row["low"]) <= sl:
+                exit_premium = sl
+                exit_reason = "SL"
+                break
+            if elapsed >= 120:
+                exit_premium = float(row["close"])
+                exit_reason = "TIME_STOP"
+                break
+        eff_exit = exit_premium * (1 - SLIPPAGE)
+        pnl = (eff_exit - eff_entry) * LOT_SIZE - (BROKERAGE_PER_LEG * 2)
+        nm.hypothetical_exit_premium = exit_premium
+        nm.hypothetical_exit_reason = exit_reason
+        nm.hypothetical_pnl = pnl
+        if pnl > 200:
+            nm.hypothetical_outcome = "WIN"
+        elif pnl < -200:
+            nm.hypothetical_outcome = "LOSS"
+        else:
+            nm.hypothetical_outcome = "BREAKEVEN"
 
     # ----- exits ---------------------------------------------------------
 
@@ -432,6 +559,13 @@ def run() -> None:
     with pickle_path.open("wb") as fh:
         pickle.dump(pickled, fh)
     print(f"Pickled trades: {pickle_path.relative_to(ROOT)}")
+
+    near_miss_path = out_dir / "phase11_near_misses.pkl"
+    near_misses = {name: runner.near_misses for name, runner in runners.items()}
+    with near_miss_path.open("wb") as fh:
+        pickle.dump(near_misses, fh)
+    n_total = sum(len(v) for v in near_misses.values())
+    print(f"Pickled {n_total} near-misses: {near_miss_path.relative_to(ROOT)}")
 
 
 # ---------------------------------------------------------------------------

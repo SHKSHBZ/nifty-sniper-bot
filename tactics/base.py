@@ -135,6 +135,27 @@ class TacticConfig:
 
 
 # ---------------------------------------------------------------------------
+# Diagnostic — per-gate pass/fail with values, used for near-miss detection
+# ---------------------------------------------------------------------------
+
+@dataclass
+class GateResult:
+    """One gate's verdict at a moment in time."""
+    passed: bool
+    value: object         # actual measured value (float / bool / str)
+    threshold: object     # the threshold being compared against
+    description: str = "" # human-readable explanation
+
+    def detail(self) -> str:
+        """Compact single-line description suitable for journals."""
+        if self.description:
+            return self.description
+        if isinstance(self.value, float) and isinstance(self.threshold, float):
+            return f"value={self.value:.4f} threshold={self.threshold:.4f}"
+        return f"value={self.value} threshold={self.threshold}"
+
+
+# ---------------------------------------------------------------------------
 # Abstract Tactic
 # ---------------------------------------------------------------------------
 
@@ -157,6 +178,19 @@ class Tactic(ABC):
     @abstractmethod
     def evaluate(self, state: TacticState) -> Optional[TacticSignal]:
         ...
+
+    def gates_for_direction(
+        self, state: TacticState, direction: DirectionType
+    ) -> dict[str, GateResult]:
+        """
+        Return per-gate verdicts assuming the tactic was considering an
+        entry in the given direction. Used by the runner / journal to
+        identify near-misses (cases where all-but-one gate passed).
+
+        Default implementation returns an empty dict. Each tactic
+        subclass overrides with its real per-gate evaluation.
+        """
+        return {}
 
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}({self.config.name})"

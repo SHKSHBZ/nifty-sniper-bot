@@ -17,7 +17,9 @@ from dataclasses import dataclass
 from datetime import time
 from typing import Optional
 
-from tactics.base import Tactic, TacticConfig, TacticState, TacticSignal
+from tactics.base import (
+    Tactic, TacticConfig, TacticState, TacticSignal, GateResult,
+)
 
 
 @dataclass
@@ -154,3 +156,69 @@ class BearishORBTactic(Tactic):
                 reason=f"Bearish ORB pyramid lot3 at -{progress:.0f} pts",
             )
         return None
+
+    # ------------------------------------------------------------------
+    # Diagnostic gates — only the PE direction is meaningful here
+    # ------------------------------------------------------------------
+    def gates_for_direction(
+        self, s: TacticState, direction: str
+    ) -> dict[str, GateResult]:
+        if direction != "PE":
+            return {}
+        cfg = self.config
+        gates: dict[str, GateResult] = {}
+        gates["dte_ok"] = GateResult(
+            s.dte >= cfg.dte_min, s.dte, cfg.dte_min,
+            f"DTE {s.dte} >= {cfg.dte_min}",
+        )
+        t = s.ts.time()
+        gates["entry_window"] = GateResult(
+            cfg.no_entry_before <= t < cfg.entry_window_end,
+            t.isoformat(timespec='minutes'),
+            f"{cfg.no_entry_before}-{cfg.entry_window_end}",
+        )
+        gap = ((s.day_open - s.prev_day_close) / s.prev_day_close
+               if s.prev_day_close > 0 else 0.0)
+        gates["gap_down_min"] = GateResult(
+            gap <= -cfg.gap_min_pct, gap, -cfg.gap_min_pct,
+            f"gap {gap*100:.2f}% <= -{cfg.gap_min_pct*100:.2f}%",
+        )
+        gates["vix_ok"] = GateResult(
+            s.vix_level < cfg.vix_max, s.vix_level, cfg.vix_max,
+            f"VIX {s.vix_level:.2f} < {cfg.vix_max}",
+        )
+        gates["vix_chg_ok"] = GateResult(
+            abs(s.vix_chg_15m) < cfg.vix_chg_15m_max,
+            abs(s.vix_chg_15m), cfg.vix_chg_15m_max,
+            f"|VIX Δ15m| {abs(s.vix_chg_15m)*100:.2f}% < {cfg.vix_chg_15m_max*100:.2f}%",
+        )
+        gates["gap_not_filled"] = GateResult(
+            s.spot < s.prev_day_close, s.spot, s.prev_day_close,
+            f"spot {s.spot:.0f} still < prev close {s.prev_day_close:.0f}",
+        )
+        gates["or_levels_present"] = GateResult(
+            s.or_high > 0 and s.or_low > 0,
+            (s.or_high, s.or_low), "non-zero",
+            f"OR_high={s.or_high:.0f} OR_low={s.or_low:.0f}",
+        )
+        gates["bar_close_below_OR_low"] = GateResult(
+            s.bar_close < s.or_low, s.bar_close, s.or_low,
+            f"close {s.bar_close:.0f} < OR_low {s.or_low:.0f}",
+        )
+        gates["prev_close_below_OR_low"] = GateResult(
+            s.prev_bar_close < s.or_low, s.prev_bar_close, s.or_low,
+            f"prev close {s.prev_bar_close:.0f} < OR_low {s.or_low:.0f}",
+        )
+        if s.or_volume_avg > 0:
+            ratio = s.bar_volume / s.or_volume_avg
+            gates["volume_confirmation"] = GateResult(
+                ratio >= cfg.breakdown_volume_ratio_min,
+                ratio, cfg.breakdown_volume_ratio_min,
+                f"vol ratio {ratio:.2f} >= {cfg.breakdown_volume_ratio_min}",
+            )
+        else:
+            gates["volume_confirmation"] = GateResult(
+                False, 0, cfg.breakdown_volume_ratio_min,
+                "or_volume_avg is 0 — no volume data (likely spot-only feed)",
+            )
+        return gates
