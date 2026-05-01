@@ -28,6 +28,7 @@ from tactics.vwap_hybrid import VWAPHybridTactic
 from tactics.trend_pullback import TrendPullbackTactic
 from tactics.bullish_orb import BullishORBTactic
 from tactics.bearish_orb import BearishORBTactic
+from tactics.ief import IEFTactic, IEFConfig, IEFAnalyzer
 
 __all__ = [
     "TacticState",
@@ -38,4 +39,7 @@ __all__ = [
     "TrendPullbackTactic",
     "BullishORBTactic",
     "BearishORBTactic",
+    "IEFTactic",
+    "IEFConfig",
+    "IEFAnalyzer",
 ]

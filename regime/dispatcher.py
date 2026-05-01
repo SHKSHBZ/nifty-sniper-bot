@@ -32,7 +32,7 @@ from regime.router import StrategyRouter, Tactic
 from regime.indicators import IndicatorTracker
 from tactics import (
     TacticState, TacticSignal,
-    TrendPullbackTactic, BullishORBTactic, BearishORBTactic,
+    TrendPullbackTactic, BullishORBTactic, BearishORBTactic, IEFTactic,
 )
 
 log = logging.getLogger("dispatcher")
@@ -86,6 +86,10 @@ class TacticDispatcher:
             Tactic.BULLISH_LAUNCHPAD: BullishORBTactic(),
             Tactic.BEARISH_LAUNCHPAD: BearishORBTactic(),
         }
+        # IEF is a "bonus" tactic that fires alongside the trend tactic when
+        # the SMC pattern aligns. It's queried in addition to the routed
+        # tactic on TREND_UP / TREND_DOWN regimes.
+        self.ief_tactic = IEFTactic()
 
     # ----- lifecycle ----------------------------------------------------
 
@@ -207,6 +211,17 @@ class TacticDispatcher:
         )
 
         sig = tactic.evaluate(state)
+
+        # On TREND regimes, also give IEF a chance (it has a stricter setup
+        # so will only fire on real SMC patterns; rare but high-quality).
+        if sig is None and regime in (Regime.TREND_UP, Regime.TREND_DOWN,
+                                       Regime.TREND_UP_GAP, Regime.TREND_DOWN_GAP):
+            ief_sig = self.ief_tactic.evaluate(state)
+            if ief_sig is not None:
+                legacy = _legacy_signal_from_tactic(ief_sig, regime, dte, is_expiry)
+                legacy["tactic_name"] = "ief"
+                return legacy
+
         if sig is None:
             return _legacy_signal_no_trade(
                 f"[{regime.value}] {decision.tactic.value} declined entry"
@@ -275,6 +290,7 @@ class TacticDispatcher:
             prev_bar_close=snap["prev_bar_close"],
             recent_5m_lows=snap["recent_5m_lows"],
             recent_5m_highs=snap["recent_5m_highs"],
+            recent_5m_bars=snap.get("recent_5m_bars", ()),
             support_strike=support,
             resistance_strike=resistance,
             focus_pcr=focus_pcr,

@@ -71,6 +71,11 @@ class TacticState:
     recent_5m_lows: tuple[float, ...] = ()
     recent_5m_highs: tuple[float, ...] = ()
 
+    # Full OHLC history of recent 5m bars (most-recent last). Used by tactics
+    # that need swing-pivot / structure-break / OB / FVG analysis (IEF).
+    # Each entry is (ts_iso, open, high, low, close).
+    recent_5m_bars: tuple[tuple, ...] = ()
+
     # Option chain & macro
     support_strike: int = 0
     resistance_strike: int = 0

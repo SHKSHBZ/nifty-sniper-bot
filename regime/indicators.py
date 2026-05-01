@@ -169,7 +169,9 @@ class IndicatorTracker:
         """Return a snapshot suitable for building TacticState."""
         bar = self.current_bar
         prev_bar = self.bars_5m[-1] if self.bars_5m else None
-        recent_5 = self.bars_5m[-3:]
+        recent_3 = self.bars_5m[-3:]
+        # IEF needs deeper OHLC history (last 50 finalized bars)
+        recent_50 = self.bars_5m[-50:]
         return {
             "day": self.day,
             "prev_day_close": self.prev_day_close,
@@ -190,6 +192,9 @@ class IndicatorTracker:
             "prev_bar_high": prev_bar.high if prev_bar else 0.0,
             "prev_bar_low": prev_bar.low if prev_bar else 0.0,
             "prev_bar_close": prev_bar.close if prev_bar else 0.0,
-            "recent_5m_lows": tuple(b.low for b in recent_5),
-            "recent_5m_highs": tuple(b.high for b in recent_5),
+            "recent_5m_lows": tuple(b.low for b in recent_3),
+            "recent_5m_highs": tuple(b.high for b in recent_3),
+            "recent_5m_bars": tuple(
+                (b.ts, b.open, b.high, b.low, b.close) for b in recent_50
+            ),
         }

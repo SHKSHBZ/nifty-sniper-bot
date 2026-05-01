@@ -36,6 +36,7 @@ from regime.classifier import (  # noqa: E402
 from tactics import (  # noqa: E402
     Tactic, TacticState, TacticSignal,
     VWAPHybridTactic, TrendPullbackTactic, BullishORBTactic, BearishORBTactic,
+    IEFTactic,
 )
 from backtesting.backtest_regime_phase1 import (  # noqa: E402
     load_spot, load_vix, resample, previous_day_close, build_feature_for_bar,
@@ -385,6 +386,7 @@ def run() -> None:
         "trend_pullback": TrendPullbackTactic(),
         "bullish_orb":    BullishORBTactic(),
         "bearish_orb":    BearishORBTactic(),
+        "ief":            IEFTactic(),
     }
     runners = {name: TacticRunner(name, t) for name, t in tactics_map.items()}
 
@@ -488,6 +490,14 @@ def run() -> None:
             recent_lows = tuple(float(x) for x in recent["low"].tolist())
             recent_highs = tuple(float(x) for x in recent["high"].tolist())
 
+            # Full OHLC history for IEF (last 50 5m bars)
+            recent_full = day_5m_upto_now.tail(50)
+            recent_5m_bars = tuple(
+                (idx.to_pydatetime(), float(r["open"]), float(r["high"]),
+                 float(r["low"]), float(r["close"]))
+                for idx, r in recent_full.iterrows()
+            )
+
             # 6) ADX at this bar
             adx_now = 0.0
             if len(adx15):
@@ -526,6 +536,7 @@ def run() -> None:
                 prev_bar_close=float(prev_5m["close"]) if prev_5m is not None else 0.0,
                 recent_5m_lows=recent_lows,
                 recent_5m_highs=recent_highs,
+                recent_5m_bars=recent_5m_bars,
                 support_strike=chain_state["support"],
                 resistance_strike=chain_state["resistance"],
                 focus_pcr=chain_state["focus_pcr"],
