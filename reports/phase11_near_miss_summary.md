@@ -1,7 +1,7 @@
 # Phase 11 — Near-Miss Aggregate Analysis
 
-Total near-misses captured: **956**
-Date range: 2024-01-08 12:00:00+05:30 -> 2026-04-21 13:25:00+05:30
+Total near-misses captured: **35,518**
+Date range: 2024-01-01 10:00:00+05:30 -> 2026-04-21 13:25:00+05:30
 A near-miss is a 5-min bar where exactly ONE gate blocked the tactic from firing. For each, we simulate the would-have-been trade with default exits (TP +50%, SL -30%, time stop 120m) and classify the outcome.
 
 ## Per-Tactic Summary
@@ -10,6 +10,7 @@ A near-miss is a 5-min bar where exactly ONE gate blocked the tactic from firing
 |---|---:|---:|---:|---:|---:|---:|
 | bearish_orb | 26 | 1 | 10 | 0 | 15 | Rs -9,596 |
 | bullish_orb | 48 | 2 | 12 | 0 | 34 | Rs -27,392 |
+| ief | 34562 | 3847 | 6812 | 781 | 23122 | Rs -5,396,197 |
 | trend_pullback | 430 | 164 | 235 | 26 | 5 | Rs -32,370 |
 | vwap_hybrid | 452 | 95 | 175 | 16 | 166 | Rs -129,748 |
 
@@ -28,6 +29,20 @@ For each (tactic, blocker), counts how often it fired AND the net hypothetical P
 | Blocker | Times fired | W | L | BE | UNK | Net hypothetical P&L | Verdict |
 |---|---:|---:|---:|---:|---:|---:|---|
 | `volume_confirmation` | 48 | 2 | 12 | 0 | 34 | Rs -27,392 | ✅ KEEP — rejecting losers |
+
+### ief
+
+| Blocker | Times fired | W | L | BE | UNK | Net hypothetical P&L | Verdict |
+|---|---:|---:|---:|---:|---:|---:|---|
+| `price_in_golden_zone` | 1749 | 248 | 324 | 49 | 1128 | Rs 15,223 | 🔴 RELAX — rejecting winners |
+| `dte_ok` | 7 | 4 | 2 | 0 | 1 | Rs 3,943 | 🔴 RELAX — rejecting winners |
+| `close_lower_than_prev` | 2 | 0 | 0 | 0 | 2 | Rs 0 | (too few samples) |
+| `close_higher_than_prev` | 1 | 0 | 0 | 0 | 1 | Rs 0 | (too few samples) |
+| `ob_or_fvg_confluence` | 21 | 1 | 2 | 1 | 17 | Rs -1,593 | (too few samples) |
+| `choch_recent` | 23 | 0 | 7 | 3 | 13 | Rs -7,714 | ✅ KEEP — rejecting losers |
+| `choch_direction_match` | 5581 | 614 | 1102 | 160 | 3705 | Rs -930,661 | ✅ KEEP — rejecting losers |
+| `enough_history` | 12066 | 1410 | 2395 | 214 | 8047 | Rs -1,947,035 | ✅ KEEP — rejecting losers |
+| `choch_present` | 15112 | 1570 | 2980 | 354 | 10208 | Rs -2,528,360 | ✅ KEEP — rejecting losers |
 
 ### trend_pullback
 
@@ -67,6 +82,8 @@ For each (tactic, blocker), counts how often it fired AND the net hypothetical P
 |---|---|---:|---:|---:|---:|
 | bearish_orb | PE | 26 | 1 | 10 | Rs -9,596 |
 | bullish_orb | CE | 48 | 2 | 12 | Rs -27,392 |
+| ief | CE | 17434 | 1825 | 3488 | Rs -3,486,213 |
+| ief | PE | 17128 | 2022 | 3324 | Rs -1,909,984 |
 | trend_pullback | CE | 211 | 80 | 122 | Rs -33,399 |
 | trend_pullback | PE | 219 | 84 | 113 | Rs 1,030 |
 | vwap_hybrid | CE | 398 | 86 | 150 | Rs -117,684 |
@@ -76,23 +93,23 @@ For each (tactic, blocker), counts how often it fired AND the net hypothetical P
 
 | Date | Time | Tactic | Dir | Blocker | Hypo P&L | Outcome |
 |---|---|---|---|---|---:|---|
-| 2026-03-20 | 10:55 | vwap_hybrid | PE | `price_extended_above_vwap` | Rs +8,751 | WIN |
-| 2026-03-20 | 11:40 | vwap_hybrid | PE | `price_extended_above_vwap` | Rs +8,700 | WIN |
-| 2024-11-22 | 13:20 | trend_pullback | CE | `reclaim_close_gt_prev` | Rs +8,659 | WIN |
-| 2026-03-20 | 11:35 | vwap_hybrid | PE | `price_extended_above_vwap` | Rs +8,468 | WIN |
-| 2026-03-20 | 11:30 | vwap_hybrid | PE | `price_extended_above_vwap` | Rs +8,300 | WIN |
-| 2024-11-05 | 11:55 | vwap_hybrid | CE | `failure_of_lows` | Rs +8,057 | WIN |
-| 2024-11-22 | 13:45 | trend_pullback | CE | `oi_bias_magnitude` | Rs +8,003 | WIN |
-| 2024-11-04 | 10:00 | trend_pullback | PE | `regime_is_TREND_DOWN` | Rs +7,387 | WIN |
-| 2024-11-05 | 12:05 | vwap_hybrid | CE | `price_extended_below_vwap` | Rs +7,363 | WIN |
-| 2024-11-05 | 12:15 | vwap_hybrid | CE | `price_extended_below_vwap` | Rs +7,230 | WIN |
-| 2024-10-04 | 13:10 | vwap_hybrid | CE | `reclaim_close` | Rs -7,210 | LOSS |
-| 2024-11-05 | 12:00 | vwap_hybrid | CE | `price_extended_below_vwap` | Rs +6,961 | WIN |
-| 2026-01-29 | 12:45 | trend_pullback | CE | `oi_bias_magnitude` | Rs +6,622 | WIN |
-| 2024-10-04 | 13:25 | vwap_hybrid | CE | `failure_of_lows` | Rs -6,590 | LOSS |
-| 2024-09-20 | 13:15 | trend_pullback | CE | `oi_bias_magnitude` | Rs -6,163 | LOSS |
-| 2026-04-02 | 13:30 | trend_pullback | CE | `vix_ok` | Rs +5,934 | WIN |
-| 2024-10-07 | 10:15 | vwap_hybrid | CE | `price_extended_below_vwap` | Rs -5,698 | LOSS |
-| 2024-12-17 | 10:15 | trend_pullback | PE | `regime_is_TREND_DOWN` | Rs +5,677 | WIN |
-| 2025-10-08 | 12:30 | vwap_hybrid | CE | `price_extended_below_vwap` | Rs +5,613 | WIN |
-| 2026-04-16 | 10:20 | trend_pullback | PE | `regime_is_TREND_DOWN` | Rs +5,607 | WIN |
+| 2026-04-02 | 13:00 | ief | CE | `choch_present` | Rs +12,216 | WIN |
+| 2026-04-02 | 12:00 | ief | CE | `choch_present` | Rs +11,737 | WIN |
+| 2026-04-02 | 13:10 | ief | CE | `choch_present` | Rs +11,605 | WIN |
+| 2026-04-02 | 12:45 | ief | CE | `choch_present` | Rs +11,449 | WIN |
+| 2026-04-02 | 12:40 | ief | CE | `choch_present` | Rs +11,422 | WIN |
+| 2026-04-02 | 12:15 | ief | CE | `choch_present` | Rs +11,418 | WIN |
+| 2026-04-02 | 12:10 | ief | CE | `choch_present` | Rs +11,389 | WIN |
+| 2026-04-02 | 12:05 | ief | CE | `choch_present` | Rs +11,298 | WIN |
+| 2026-04-02 | 11:50 | ief | CE | `choch_present` | Rs +11,165 | WIN |
+| 2026-04-02 | 12:50 | ief | CE | `choch_present` | Rs +11,161 | WIN |
+| 2026-04-02 | 12:20 | ief | CE | `choch_present` | Rs +11,099 | WIN |
+| 2026-04-02 | 12:30 | ief | CE | `choch_present` | Rs +11,030 | WIN |
+| 2026-04-02 | 12:55 | ief | CE | `choch_present` | Rs +10,986 | WIN |
+| 2026-04-02 | 13:05 | ief | CE | `choch_present` | Rs +10,854 | WIN |
+| 2026-04-02 | 11:45 | ief | CE | `choch_present` | Rs +10,811 | WIN |
+| 2026-04-02 | 13:15 | ief | CE | `choch_present` | Rs +10,705 | WIN |
+| 2026-04-02 | 11:35 | ief | CE | `choch_present` | Rs +10,695 | WIN |
+| 2026-04-02 | 12:35 | ief | CE | `choch_present` | Rs +10,622 | WIN |
+| 2026-04-02 | 12:25 | ief | CE | `choch_present` | Rs +10,339 | WIN |
+| 2026-04-02 | 13:20 | ief | CE | `choch_present` | Rs +10,225 | WIN |

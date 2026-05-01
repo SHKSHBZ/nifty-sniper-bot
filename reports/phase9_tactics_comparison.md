@@ -11,6 +11,7 @@ Reference: production OI-Wall MR Phase 4 result was -Rs 53,393 over 159 trades.
 | trend_pullback | 32 | 15 | 46.9 | Rs 9,939 | Rs 1,698 | Rs -914 | 1.64 | Rs 4,718 |
 | bullish_orb | 0 | 0 | 0.0 | Rs 0 | Rs 0 | Rs 0 | inf | Rs 0 |
 | bearish_orb | 0 | 0 | 0.0 | Rs 0 | Rs 0 | Rs 0 | inf | Rs 0 |
+| ief | 6 | 2 | 33.3 | Rs -2,756 | Rs 3,897 | Rs -2,638 | 0.74 | Rs 4,717 |
 
 ## Per-Tactic Detail
 
@@ -55,6 +56,20 @@ Reference: production OI-Wall MR Phase 4 result was -Rs 53,393 over 159 trades.
 ### bearish_orb
 
   (no trades)
+
+### ief
+
+- Trades: 6  Wins: 2  Losers: 4
+- Net P&L: Rs -2,756    PF: 0.74
+- Exit reasons: {'EOD': 3, 'SL': 2, 'TP': 1}
+
+  Monthly P&L:
+  | Month | Trades | Net P&L |
+  |---|---:|---:|
+  | 2025-10 | 2 | Rs -5,855 |
+  | 2025-11 | 1 | Rs 4,838 |
+  | 2025-12 | 1 | Rs -971 |
+  | 2026-01 | 2 | Rs -768 |
 
 
 ## Per-Trade Sample (first 100 of each)
@@ -109,3 +124,14 @@ Reference: production OI-Wall MR Phase 4 result was -Rs 53,393 over 159 trades.
 | 2026-02-20 | 13:55 | 14:30 | TREND_UP | CE | 25550 | 153 | 164 | EOD | 480 |
 | 2026-02-25 | 12:45 | 14:15 | TREND_DOWN | PE | 25500 | 144 | 154 | TIME_STOP | 351 |
 | 2026-02-27 | 12:55 | 14:00 | TREND_DOWN | PE | 25350 | 138 | 97 | SL | -3,431 |
+
+### ief — first 100 trades
+
+| Day | Entry | Exit | Reg | Dir | Strike | Entry₹ | Exit₹ | Reason | Net P&L |
+|---|---|---|---|---|---:|---:|---:|---|---:|
+| 2025-10-01 | 14:10 | 14:30 | TREND_UP | PE | 24850 | 106 | 95 | EOD | -1,138 |
+| 2025-10-23 | 13:05 | 14:10 | TREND_UP_GAP | CE | 26000 | 191 | 134 | SL | -4,717 |
+| 2025-11-13 | 13:05 | 14:10 | TREND_UP | PE | 26050 | 141 | 212 | TP | 4,838 |
+| 2025-12-19 | 12:40 | 14:30 | RANGE | PE | 26000 | 100 | 90 | EOD | -971 |
+| 2026-01-23 | 13:10 | 13:30 | TREND_DOWN | CE | 25150 | 150 | 105 | SL | -3,724 |
+| 2026-01-30 | 13:10 | 14:30 | TREND_UP | CE | 25200 | 237 | 285 | EOD | 2,957 |
