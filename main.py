@@ -16,6 +16,7 @@ from regime.market_hours import (
 )
 from journal import JournalRecorder, write_daily_report, analyze_trade
 from journal.models import ExecutedTrade
+from journal.missed_tracker import LiveMissedTracker
 
 # Create logs directory
 Path("logs").mkdir(exist_ok=True)
@@ -65,10 +66,23 @@ class LiveOrchestrator:
 
         # --- Regime dispatcher + Journal (config-flagged) ---
         self.engine_mode = self.config.get("engine_mode", "legacy")
-        self.dispatcher = TacticDispatcher(mode=self.engine_mode)
+        self.dispatcher = TacticDispatcher(
+            mode=self.engine_mode, strike_step=self.strike_step,
+        )
         self.journal_enabled = self.config.get("journal_enabled", True)
         self.journal = JournalRecorder() if self.journal_enabled else None
         self._journal_day_started = False
+        # Live missed-opportunity tracker. Records near-misses surfaced by
+        # the dispatcher and watches the would-be option's premium for the
+        # tactic-specified time-stop window. Pure-observation; never affects
+        # routing or order placement.
+        self.missed_tracker = (
+            LiveMissedTracker(
+                self.journal, self.fetcher,
+                lot_size=self.lot_size,
+            ) if self.journal is not None else None
+        )
+        self._last_nm_probe_ts: datetime | None = None
         logger.info(f"[OK] Engine mode: {self.engine_mode}, "
                     f"Journal: {'ON' if self.journal_enabled else 'OFF'}")
 
@@ -109,6 +123,12 @@ class LiveOrchestrator:
                     spot = self.fetcher.get_spot()
                     if spot > 0:
                         self.dispatcher.on_spot_tick(now, spot)
+
+                # Tick the live missed-opportunity tracker — polls in-flight
+                # follow-ups and finalises any that hit TP/SL/time. Wrapped
+                # in try/except inside; never raises here.
+                if self.missed_tracker is not None and self._journal_day_started:
+                    self.missed_tracker.tick(now)
 
                 # Force Time Gate exit at 14:30 IST
                 if t >= FORCE_FLAT_TIME:
@@ -208,6 +228,10 @@ class LiveOrchestrator:
             except Exception as e:
                 logger.debug(f"Journal on_path_tick failed: {e}")
 
+        # Even while holding a position, surface any near-misses on the
+        # OPPOSITE-direction side. Probe at most once a minute.
+        self._probe_near_misses_in_position(now, pos)
+
         # 1. Update Trailing Stop Loss if profit hits +15%
         if live_premium >= pos['entry_price'] * 1.15 and not pos.get('tsl_active'):
             pos['tsl_active'] = True
@@ -253,6 +277,11 @@ class LiveOrchestrator:
             engine=self.engine,
             in_position=False,
         )
+
+        # Register any near-misses surfaced by the dispatcher with the
+        # live missed-tracker. Wrapped to never affect trading flow.
+        for nm in signal.get('near_misses', []):
+            self._register_near_miss_safely(nm)
 
         if signal['direction']:
             direction = signal['direction']
@@ -422,10 +451,54 @@ class LiveOrchestrator:
         except Exception as e:
             logger.warning(f"Journal start_day failed: {e}")
 
+    # --- Near-miss helpers ---------------------------------------------
+
+    def _register_near_miss_safely(self, nm: dict) -> None:
+        if self.missed_tracker is None or not self._journal_day_started:
+            return
+        try:
+            self.missed_tracker.register_near_miss(**nm)
+        except Exception as e:
+            logger.debug(f"register_near_miss failed: {e}")
+
+    def _probe_near_misses_in_position(self, now: datetime, pos: dict) -> None:
+        """While in a position, run a passive near-miss probe once per
+        minute. Records OPPOSITE-direction near-misses too so we can see
+        what we missed during the hold."""
+        if self.missed_tracker is None or not self._journal_day_started:
+            return
+        if self.engine_mode != "regime":
+            return
+        if self._last_nm_probe_ts is not None and \
+           (now - self._last_nm_probe_ts).total_seconds() < 60:
+            return
+        self._last_nm_probe_ts = now
+        try:
+            nms = self.dispatcher.collect_near_misses_only(
+                now, self.fetcher,
+                in_position=True,
+                position_direction=pos.get('opt_type'),
+                position_entry_premium=pos.get('entry_price', 0.0),
+            )
+            for nm in nms:
+                self._register_near_miss_safely(nm)
+        except Exception as e:
+            logger.debug(f"in-position near-miss probe failed: {e}")
+
     def _finalize_journal_day(self) -> None:
         if self.journal is None or not self._journal_day_started:
             return
         try:
+            # Flush the missed-tracker before end_day so finalised
+            # hypothetical fields land in today's JSON / Markdown.
+            if self.missed_tracker is not None:
+                try:
+                    n = self.missed_tracker.flush_all(datetime.now(IST))
+                    if n:
+                        logger.info(f"[JOURNAL] Flushed {n} pending near-miss follow-ups")
+                except Exception as e:
+                    logger.warning(f"missed-tracker flush_all failed: {e}")
+
             realized = sum(
                 t.get("pnl", 0.0) for t in self.portfolio["trade_history"]
                 if t.get("exit_time", "")[:10] == datetime.now().date().isoformat()

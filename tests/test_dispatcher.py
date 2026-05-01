@@ -225,3 +225,114 @@ class TestDispatcherDTECalc:
         assert d._compute_dte("2026-04-21", ts) == 0
         assert d._compute_dte(None, ts) == 99
         assert d._compute_dte("garbage", ts) == 99
+
+
+# ---------------------------------------------------------------------------
+# Near-miss collection tests
+# ---------------------------------------------------------------------------
+
+from tactics.base import (  # noqa: E402
+    Tactic, TacticConfig, TacticSignal, TacticState, GateResult,
+)
+
+
+class _StubTactic(Tactic):
+    """Tactic with programmable gate results — used to drive near-miss
+    collection deterministically."""
+
+    def __init__(self, ce_gates: dict, pe_gates: dict, name: str = "stub"):
+        cfg = TacticConfig(name=name)
+        super().__init__(cfg)
+        self.ce_gates = ce_gates
+        self.pe_gates = pe_gates
+        self.config.sl_pct = 0.30
+        self.config.tp_pct = 0.50
+        self.config.time_stop_min = 90
+        self.config.strike_offset = 1
+
+    def evaluate(self, state):
+        return None  # never fires; we only care about gates
+
+    def gates_for_direction(self, state, direction):
+        src = self.ce_gates if direction == "CE" else self.pe_gates
+        return {
+            name: GateResult(passed=val, value=val, threshold=True,
+                              description=f"{name}={val}")
+            for name, val in src.items()
+        }
+
+
+class TestNearMissCollection:
+    def _state(self):
+        return TacticState(
+            ts=datetime(2026, 4, 21, 11, 0),
+            spot=24800.0, futures=24800.0,
+            vwap=24800.0, ema9_5m=24800.0,
+            regime="TREND_UP", dte=3,
+            vix_level=15.0, focus_pcr=1.0,
+        )
+
+    def test_one_gate_fail_yields_one_near_miss(self):
+        d = TacticDispatcher(mode="regime")
+        d.tactics = {}  # clear default tactics
+        # Inject our stub via the existing IEF slot for simplicity
+        ce = {"a": True, "b": True, "c": False}
+        pe = {"a": True, "b": True, "c": True}
+        d.ief_tactic = _StubTactic(ce, pe, name="stub")
+        nms = d._collect_near_misses_for_state(self._state(), spot=24800.0)
+        assert len(nms) == 1
+        assert nms[0]["direction"] == "CE"
+        assert nms[0]["blocked_by"] == "c"
+        assert nms[0]["sl_pct"] == 0.30
+        assert nms[0]["tp_pct"] == 0.50
+        assert nms[0]["time_stop_min"] == 90
+
+    def test_all_gates_pass_yields_no_near_miss(self):
+        d = TacticDispatcher(mode="regime")
+        d.tactics = {}
+        d.ief_tactic = _StubTactic({"a": True, "b": True}, {"a": True, "b": True})
+        nms = d._collect_near_misses_for_state(self._state(), spot=24800.0)
+        # Both directions all-pass -> no near-miss (would have fired)
+        assert nms == []
+
+    def test_two_gates_fail_yields_no_near_miss(self):
+        d = TacticDispatcher(mode="regime")
+        d.tactics = {}
+        d.ief_tactic = _StubTactic(
+            {"a": False, "b": False, "c": True},
+            {"a": True,  "b": True,  "c": True},
+        )
+        nms = d._collect_near_misses_for_state(self._state(), spot=24800.0)
+        assert nms == []
+
+    def test_collect_near_misses_only_uses_fetcher(self):
+        """Public entry-point: works without engine, no routing side-effects."""
+        d = TacticDispatcher(mode="regime")
+        d.reset_for_new_day(date(2026, 4, 21), prev_day_close=24700.0)
+        for hh, mm in [(9, 16), (10, 0), (11, 0)]:
+            d.on_spot_tick(datetime(2026, 4, 21, hh, mm), 24800)
+        d.tactics = {}
+        d.ief_tactic = _StubTactic({"a": True, "b": False}, {"a": True, "b": True})
+        nms = d.collect_near_misses_only(
+            datetime(2026, 4, 21, 11, 0),
+            StubFetcher(),
+            in_position=True,
+            position_direction="CE",
+        )
+        # CE fails on "b" (1 gate) -> near-miss
+        assert any(nm["blocked_by"] == "b" for nm in nms)
+
+
+class TestDispatcherNearMissesFieldOnSignal:
+    def test_evaluate_attaches_near_misses_key_on_no_trade(self):
+        d = TacticDispatcher(mode="regime")
+        d.reset_for_new_day(date(2026, 4, 21), prev_day_close=24700.0)
+        for hh, mm in [(9, 16), (10, 0), (11, 0)]:
+            d.on_spot_tick(datetime(2026, 4, 21, hh, mm), 24800)
+        sig = d.evaluate(
+            ts=datetime(2026, 4, 21, 11, 0),
+            fetcher=StubFetcher(), engine=StubEngine(),
+            in_position=False,
+        )
+        assert "near_misses" in sig
+        assert isinstance(sig["near_misses"], list)

@@ -34,6 +34,13 @@ from tactics import (
     TacticState, TacticSignal,
     TrendPullbackTactic, BullishORBTactic, BearishORBTactic, IEFTactic,
 )
+from tactics.base import Tactic as TacticBase
+
+# Strike step is index-specific. The dispatcher is index-agnostic so we
+# default to NIFTY (50) for hypothetical-strike calculation; the tracker
+# only uses this to look up an LTP, so being one step off would simply
+# log slightly off-strike data — never affects trading.
+_DEFAULT_STRIKE_STEP = 50
 
 log = logging.getLogger("dispatcher")
 
@@ -46,6 +53,7 @@ def _legacy_signal_no_trade(reason: str) -> dict:
         "dte_days": 99,
         "is_expiry_day": False,
         "score": 0,
+        "near_misses": [],
     }
 
 
@@ -76,8 +84,9 @@ def _legacy_signal_from_tactic(
 
 
 class TacticDispatcher:
-    def __init__(self, mode: str = "regime"):
+    def __init__(self, mode: str = "regime", *, strike_step: int = _DEFAULT_STRIKE_STEP):
         self.mode = mode
+        self.strike_step = strike_step
         self.classifier = RegimeClassifier(ClassifierConfig(sustain_min=15))
         self.router = StrategyRouter()
         self.indicators = IndicatorTracker()
@@ -176,6 +185,7 @@ class TacticDispatcher:
                 "dte_risk": "N/A", "dte_days": dte,
                 "is_expiry_day": is_expiry, "score": 0,
                 "force_exit": True,
+                "near_misses": [],
             }
 
         if decision.tactic == Tactic.NO_TRADE:
@@ -220,18 +230,138 @@ class TacticDispatcher:
             if ief_sig is not None:
                 legacy = _legacy_signal_from_tactic(ief_sig, regime, dte, is_expiry)
                 legacy["tactic_name"] = "ief"
+                legacy["near_misses"] = []
                 return legacy
 
         if sig is None:
-            return _legacy_signal_no_trade(
+            no_trade = _legacy_signal_no_trade(
                 f"[{regime.value}] {decision.tactic.value} declined entry"
             )
+            no_trade["near_misses"] = self._collect_near_misses_for_state(
+                state, spot
+            )
+            return no_trade
 
         legacy = _legacy_signal_from_tactic(sig, regime, dte, is_expiry)
         legacy["tactic_name"] = decision.tactic.value
+        legacy["near_misses"] = []
         return legacy
 
     # ----- helpers ------------------------------------------------------
+
+    # ----- near-miss probing ------------------------------------------
+
+    def collect_near_misses_only(
+        self,
+        ts: datetime,
+        fetcher,
+        *,
+        in_position: bool = False,
+        position_direction: Optional[str] = None,
+        position_entry_premium: float = 0.0,
+        position_lots_added: int = 0,
+    ) -> list[dict]:
+        """Read-only probe: build TacticState and ask each registered
+        tactic for its per-direction gate verdicts. Returns near-miss
+        dicts for every tactic that would have fired with exactly one
+        gate failing. Has no side-effects on routing or state."""
+        try:
+            spot = fetcher.get_spot()
+            if spot <= 0:
+                return []
+            self.indicators.on_spot_tick(ts, spot)
+            snap = self.indicators.snapshot()
+            vix = fetcher.get_india_vix()
+            focus_pcr = fetcher.get_focus_pcr()
+            oi_pattern = fetcher.get_oi_pattern()
+            support = fetcher.get_support()
+            resistance = fetcher.get_resistance()
+            expiry_str = fetcher.get_expiry_date()
+            dte = self._compute_dte(expiry_str, ts)
+
+            # Use the *current* classified regime if known (probing has
+            # no effect on classifier state).
+            regime_str = (
+                self.classifier._current.value           # type: ignore[attr-defined]
+                if self.classifier._current is not None  # type: ignore[attr-defined]
+                else "RANGE"
+            )
+
+            state = self._build_tactic_state(
+                ts=ts, snap=snap, spot=spot, vix=vix, focus_pcr=focus_pcr,
+                oi_pattern=oi_pattern, support=support, resistance=resistance,
+                dte=dte, expiry_str=expiry_str,
+                regime=Regime(regime_str) if regime_str in (r.value for r in Regime) else Regime.RANGE,
+                in_position=in_position,
+                position_direction=position_direction,
+                position_entry_premium=position_entry_premium,
+                position_lots_added=position_lots_added,
+            )
+            return self._collect_near_misses_for_state(state, spot)
+        except Exception as e:
+            log.debug("collect_near_misses_only failed: %s", e)
+            return []
+
+    def _collect_near_misses_for_state(
+        self, state: TacticState, spot: float,
+    ) -> list[dict]:
+        """For every registered tactic, return per-direction near-miss
+        dicts where exactly one gate failed."""
+        results: list[dict] = []
+        candidates: list[tuple[str, TacticBase]] = [
+            (t_enum.value, t_obj) for t_enum, t_obj in self.tactics.items()
+        ]
+        candidates.append(("ief", self.ief_tactic))
+
+        for tactic_name, tactic_obj in candidates:
+            try:
+                # Skip tactics whose own time-window or regime gate has
+                # nothing to say (gates_for_direction returns {}).
+                for direction in ("CE", "PE"):
+                    gates = tactic_obj.gates_for_direction(state, direction)
+                    if not gates:
+                        continue
+                    failed = [name for name, g in gates.items() if not g.passed]
+                    if len(failed) != 1:
+                        continue
+                    blocker = failed[0]
+                    cfg = getattr(tactic_obj, "config", None)
+                    sl_pct = float(getattr(cfg, "sl_pct", 0.30) or 0.30)
+                    tp_pct = float(getattr(cfg, "tp_pct", 0.50) or 0.50)
+                    time_stop_min = int(getattr(cfg, "time_stop_min", 120) or 120)
+                    strike_offset = int(getattr(cfg, "strike_offset", 0) or 0)
+
+                    atm = int(round(spot / self.strike_step) * self.strike_step)
+                    if direction == "CE":
+                        strike = atm - strike_offset * self.strike_step
+                    else:
+                        strike = atm + strike_offset * self.strike_step
+
+                    results.append({
+                        "tactic_name": tactic_name,
+                        "direction": direction,
+                        "ts": state.ts,
+                        "blocked_by": blocker,
+                        "blocker_detail": gates[blocker].detail(),
+                        "state_snapshot": {
+                            "spot": state.spot,
+                            "vwap": state.vwap,
+                            "ema9_5m": state.ema9_5m,
+                            "vix_level": state.vix_level,
+                            "regime": state.regime,
+                            "focus_pcr": state.focus_pcr,
+                            "ce_oi_change": state.ce_oi_change,
+                            "pe_oi_change": state.pe_oi_change,
+                        },
+                        "hypothetical_strike": int(strike),
+                        "sl_pct": sl_pct,
+                        "tp_pct": tp_pct,
+                        "time_stop_min": time_stop_min,
+                    })
+            except Exception as e:
+                log.debug("near-miss collection failed for %s: %s",
+                          tactic_name, e)
+        return results
 
     def _legacy_call(self, fetcher, engine, ts: datetime,
                      regime: Optional[Regime] = None) -> dict:
@@ -252,6 +382,9 @@ class TacticDispatcher:
         if regime is not None and sig.get("direction"):
             sig["reasons"].insert(0, f"[{regime.value}] OI-Wall MR fired")
         sig["tactic_name"] = "oi_wall_mean_reversion"
+        # Legacy SignalEngine has no per-gate diagnostic API yet. Always
+        # provide an empty near_misses list so callers can iterate safely.
+        sig.setdefault("near_misses", [])
         return sig
 
     def _build_tactic_state(

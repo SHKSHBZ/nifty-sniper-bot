@@ -146,6 +146,13 @@ def _append_missed(lines: list, idx: int, m: MissedEntry) -> None:
                      f"₹{m.hypothetical_exit_premium:.0f}")
         lines.append(f"  - Hypothetical P&L: **{sign}₹{m.hypothetical_pnl:,.0f}** "
                      f"(outcome: {m.hypothetical_outcome})")
+        if m.sl_pct > 0 or m.tp_pct > 0 or m.time_stop_min > 0:
+            lines.append(f"  - Tactic exit params used: "
+                         f"SL -{m.sl_pct*100:.0f}% / TP +{m.tp_pct*100:.0f}% "
+                         f"/ time {m.time_stop_min}m")
+        if m.poll_count > 0:
+            lines.append(f"  - Tracking window: {m.time_stop_min} min, "
+                         f"{m.poll_count} polls")
         if m.hypothetical_explanation:
             lines.append(f"  - {m.hypothetical_explanation}")
         lines.append("")

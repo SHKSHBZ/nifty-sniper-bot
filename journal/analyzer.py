@@ -228,12 +228,35 @@ def analyze_trade(trade: ExecutedTrade) -> ExecutedTrade:
 # Missed entries
 # ---------------------------------------------------------------------------
 
-def analyze_missed(missed: MissedEntry, hypothetical_path) -> MissedEntry:
+def analyze_missed(
+    missed: MissedEntry,
+    hypothetical_path,
+    *,
+    sl_pct: Optional[float] = None,
+    tp_pct: Optional[float] = None,
+    time_stop_min: Optional[int] = None,
+    lot_size: int = 75,
+    brokerage: float = 60.0,
+) -> MissedEntry:
     """
     `hypothetical_path` is a list of (ts, close) tuples for the option that
     WOULD have been bought. Computes the hypothetical PnL using the
     blocker tactic's prescribed SL/TP/time-stop.
+
+    If sl_pct/tp_pct/time_stop_min are not supplied, falls back to values
+    on the MissedEntry itself (set by the live tracker), and finally to
+    legacy defaults (TP +50%, SL -30%, time stop 120 min).
     """
+    eff_sl = sl_pct if sl_pct is not None else (
+        missed.sl_pct if missed.sl_pct > 0 else 0.30
+    )
+    eff_tp = tp_pct if tp_pct is not None else (
+        missed.tp_pct if missed.tp_pct > 0 else 0.50
+    )
+    eff_t = time_stop_min if time_stop_min is not None else (
+        missed.time_stop_min if missed.time_stop_min > 0 else 120
+    )
+
     if not hypothetical_path:
         missed.hypothetical_outcome = "UNKNOWN"
         missed.hypothetical_explanation = (
@@ -244,13 +267,18 @@ def analyze_missed(missed: MissedEntry, hypothetical_path) -> MissedEntry:
 
     entry_prem = missed.hypothetical_entry_premium
     if entry_prem <= 0:
-        # Use the first close as entry
         entry_prem = hypothetical_path[0][1]
         missed.hypothetical_entry_premium = entry_prem
+    if entry_prem <= 0:
+        missed.hypothetical_outcome = "UNKNOWN"
+        missed.hypothetical_explanation = (
+            "Entry premium was zero — option price data unavailable."
+        )
+        return missed
 
-    # Simple replay: TP +50%, SL -30%, time stop 90 min — neutral defaults
-    tp = entry_prem * 1.50
-    sl = entry_prem * 0.70
+    tp = entry_prem * (1 + eff_tp)
+    sl = entry_prem * (1 - eff_sl)
+    entry_ts = hypothetical_path[0][0]
 
     exit_prem = hypothetical_path[-1][1]
     exit_reason = "EOD"
@@ -263,11 +291,16 @@ def analyze_missed(missed: MissedEntry, hypothetical_path) -> MissedEntry:
             exit_prem = sl
             exit_reason = "SL"
             break
+        elapsed = (ts - entry_ts).total_seconds() / 60
+        if elapsed >= eff_t:
+            exit_prem = close
+            exit_reason = "TIME_STOP"
+            break
 
     missed.hypothetical_exit_premium = exit_prem
-    LOT = 75
-    pnl = (exit_prem - entry_prem) * LOT - 60.0
+    pnl = (exit_prem - entry_prem) * lot_size - brokerage
     missed.hypothetical_pnl = pnl
+    missed.poll_count = len(hypothetical_path)
 
     if pnl > 200:
         missed.hypothetical_outcome = "WIN"
@@ -278,7 +311,8 @@ def analyze_missed(missed: MissedEntry, hypothetical_path) -> MissedEntry:
 
     missed.hypothetical_explanation = (
         f"If the {missed.blocked_by} gate had allowed entry, the trade would "
-        f"have hit {exit_reason} (premium ₹{entry_prem:.0f} → ₹{exit_prem:.0f}, "
-        f"P&L ₹{pnl:+,.0f})."
+        f"have hit {exit_reason} (premium Rs.{entry_prem:.0f} -> Rs.{exit_prem:.0f}, "
+        f"P&L Rs.{pnl:+,.0f}; SL -{eff_sl*100:.0f}% / TP +{eff_tp*100:.0f}% / "
+        f"time {eff_t}m)."
     )
     return missed

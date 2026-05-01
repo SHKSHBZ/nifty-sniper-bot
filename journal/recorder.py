@@ -174,6 +174,9 @@ class JournalRecorder:
         state_snapshot: dict,
         hypothetical_strike: int = 0,
         hypothetical_entry_premium: float = 0.0,
+        sl_pct: float = 0.0,
+        tp_pct: float = 0.0,
+        time_stop_min: int = 0,
     ) -> MissedEntry:
         self._require_day()
         m = MissedEntry(
@@ -185,6 +188,9 @@ class JournalRecorder:
             state_snapshot=dict(state_snapshot),
             hypothetical_strike=hypothetical_strike,
             hypothetical_entry_premium=hypothetical_entry_premium,
+            sl_pct=sl_pct,
+            tp_pct=tp_pct,
+            time_stop_min=time_stop_min,
         )
         self._day.missed.append(m)
         return m

@@ -79,6 +79,19 @@ class MissedEntry:
     hypothetical_outcome: str = ""    # "WIN" / "LOSS" / "BREAKEVEN" / "UNKNOWN"
     hypothetical_explanation: str = ""
 
+    # Tactic-prescribed exit parameters used to simulate the would-be trade.
+    # Populated by the live tracker (and now by the backtest analyzer too)
+    # so the report can show what TP/SL/time-stop the verdict was computed
+    # against. Default 0/0/0 means "not specified" -> analyzer falls back
+    # to legacy defaults.
+    sl_pct: float = 0.0
+    tp_pct: float = 0.0
+    time_stop_min: int = 0
+
+    # How many premium polls the live tracker collected for this entry —
+    # diagnostic only, helps identify under-sampled near-misses.
+    poll_count: int = 0
+
 
 @dataclass
 class JournalEntry:
