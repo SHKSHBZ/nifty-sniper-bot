@@ -62,6 +62,9 @@
         "telegram_enabled": true,
         "log_full_reasoning": true
     },
+    "engine_mode": "legacy",
+    "_engine_mode_help": "legacy = single OI-Wall MR engine (current production). regime = TacticDispatcher routes between OI-Wall MR / Trend Pullback / Bullish-Bearish ORB based on classifier.",
+    "journal_enabled": true,
     "modes": {
         "paper_trade": true,
         "backtest": true,

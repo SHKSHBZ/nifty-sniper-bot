@@ -14,6 +14,8 @@ package is self-contained and safe to import into a backtest or a live run.
 from regime.classifier import RegimeClassifier, Regime, ClassifierFeatures
 from regime.router import StrategyRouter, Tactic
 from regime.master_risk import MasterRiskLayer, RiskDecision
+from regime.indicators import IndicatorTracker
+from regime.dispatcher import TacticDispatcher
 
 __all__ = [
     "RegimeClassifier",
@@ -23,4 +25,6 @@ __all__ = [
     "Tactic",
     "MasterRiskLayer",
     "RiskDecision",
+    "IndicatorTracker",
+    "TacticDispatcher",
 ]
