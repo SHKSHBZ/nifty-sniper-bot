@@ -423,6 +423,16 @@ def run() -> None:
     # ---- Reports ----
     write_reports(runners)
 
+    # ---- Pickle trades for downstream analysis (Phase 10+) ----
+    import pickle
+    out_dir = ROOT / "reports"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    pickle_path = out_dir / "phase9_tactic_trades.pkl"
+    pickled = {name: runner.trades for name, runner in runners.items()}
+    with pickle_path.open("wb") as fh:
+        pickle.dump(pickled, fh)
+    print(f"Pickled trades: {pickle_path.relative_to(ROOT)}")
+
 
 # ---------------------------------------------------------------------------
 # Reporting
