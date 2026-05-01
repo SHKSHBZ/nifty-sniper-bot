@@ -42,8 +42,11 @@ class TrendPullbackConfig(TacticConfig):
     adx_min_15m: float = 25.0
     range_ratio_min: float = 1.2
 
-    dte_min: int = 1                  # Phase 11: was 2; relax to capture
-                                       # +Rs 10,071 hypothetical edge
+    dte_min: int = 2                  # validated config (Phase 10: 6/6 walk-fwd
+                                       # passed at this value). Phase 11
+                                       # suggested 1 but actual rerun showed
+                                       # P&L dropped from +Rs 9,939 to +Rs 4,743
+                                       # — revert kept.
     dte_spread_switch: int = 3
 
     sl_pct: float = 0.30
@@ -73,12 +76,12 @@ class TrendPullbackTactic(Tactic):
         if state.adx_15m < cfg.adx_min_15m:
             return None
 
-        # Phase 11: also fire on gap-trend regimes — the classifier was
-        # rejecting ~Rs 18k of hypothetical winners by being too strict
-        # about which trend label was active.
-        if state.regime in ("TREND_UP", "TREND_UP_GAP"):
+        # Phase 11 hypothesis "also accept TREND_*_GAP" was tested in a
+        # full backtest and HURT performance (+Rs 9,939 -> +Rs 4,743).
+        # Keep strict regime match as in the 6/6 walk-forward validated config.
+        if state.regime == "TREND_UP":
             return self._evaluate_long(state)
-        if state.regime in ("TREND_DOWN", "TREND_DOWN_GAP"):
+        if state.regime == "TREND_DOWN":
             return self._evaluate_short(state)
         return None
 
@@ -192,7 +195,7 @@ class TrendPullbackTactic(Tactic):
 
         if direction == "CE":
             gates["regime_is_TREND_UP"] = GateResult(
-                s.regime in ("TREND_UP", "TREND_UP_GAP"), s.regime, "TREND_UP / TREND_UP_GAP",
+                s.regime == "TREND_UP", s.regime, "TREND_UP",
                 f"regime={s.regime}",
             )
             ratio = s.pe_oi_change / s.ce_oi_change if s.ce_oi_change > 0 else 0.0
@@ -230,7 +233,7 @@ class TrendPullbackTactic(Tactic):
             )
         else:  # PE
             gates["regime_is_TREND_DOWN"] = GateResult(
-                s.regime in ("TREND_DOWN", "TREND_DOWN_GAP"), s.regime, "TREND_DOWN / TREND_DOWN_GAP",
+                s.regime == "TREND_DOWN", s.regime, "TREND_DOWN",
                 f"regime={s.regime}",
             )
             ratio = s.ce_oi_change / s.pe_oi_change if s.pe_oi_change > 0 else 0.0
