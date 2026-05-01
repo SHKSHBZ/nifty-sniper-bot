@@ -5,11 +5,13 @@ Loads phase11_near_misses.pkl (produced by run_all_tactics.py with the
 new diagnostic gates), aggregates by (tactic, blocker), and computes
 the would-have-been P&L impact per blocker.
 
-Outputs reports/phase11_near_miss_summary.md, which answers:
+Outputs five CSVs into reports/:
 
-  * Which gate blocked the most signals?
-  * Of the trades it blocked, how many would have WON if entered?
-  * What's the cumulative hypothetical P&L delta if we relaxed each gate?
+    phase11_near_miss_raw.csv         — every near-miss row
+    phase11_near_miss_per_tactic.csv  — totals per tactic
+    phase11_near_miss_blockers.csv    — per (tactic, blocker) with verdict
+    phase11_near_miss_direction.csv   — CE/PE breakdown per tactic
+    phase11_near_miss_top_impact.csv  — top 20 highest-|P&L| near-misses
 
 This is the actionable artifact: blockers that frequently rejected
 winners are candidates for relaxation; blockers that rejected losers
@@ -19,7 +21,6 @@ from __future__ import annotations
 
 import pickle
 import sys
-from collections import defaultdict
 from pathlib import Path
 
 import pandas as pd
@@ -28,14 +29,15 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from backtesting.run_all_tactics import NearMiss, TacticTrade  # noqa: F401
-from journal.near_miss_aggregator_lib import build_full_report
+from journal.near_miss_aggregator_lib import write_all_csvs
 import __main__ as _main_mod
 _main_mod.NearMiss = NearMiss
 _main_mod.TacticTrade = TacticTrade
 
 NM_PICKLE = ROOT / "reports" / "phase11_near_misses.pkl"
 TRADE_PICKLE = ROOT / "reports" / "phase9_tactic_trades.pkl"
-OUTPUT = ROOT / "reports" / "phase11_near_miss_summary.md"
+OUT_DIR = ROOT / "reports"
+PREFIX = "phase11_near_miss"
 
 
 def load_near_misses() -> dict:
@@ -63,27 +65,16 @@ def to_df(near_misses_by_tactic: dict) -> pd.DataFrame:
                 "hypothetical_pnl": nm.hypothetical_pnl,
                 "hypothetical_outcome": nm.hypothetical_outcome,
             })
-    df = pd.DataFrame(rows)
-    return df
+    return pd.DataFrame(rows)
 
 
 def main():
     nms = load_near_misses()
     df = to_df(nms)
-    if df.empty:
-        print("No near-misses captured. Bot may have fired everything or "
-              "all tactics' gates were too far from passing.")
-        OUTPUT.write_text("# Phase 11 — No near-misses captured.\n")
-        return
-
-    lines = build_full_report(
-        df, header="# Phase 11 -- Near-Miss Aggregate Analysis\n",
-    )
-
-    OUTPUT.parent.mkdir(parents=True, exist_ok=True)
-    OUTPUT.write_text("\n".join(lines))
-    print(f"Wrote: {OUTPUT.relative_to(ROOT)}")
+    paths = write_all_csvs(df, OUT_DIR, prefix=PREFIX)
     print(f"Total near-misses: {len(df):,}")
+    for section, path in paths.items():
+        print(f"  {section}: {path.relative_to(ROOT)}")
 
 
 if __name__ == "__main__":
