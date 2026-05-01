@@ -42,7 +42,8 @@ class TrendPullbackConfig(TacticConfig):
     adx_min_15m: float = 25.0
     range_ratio_min: float = 1.2
 
-    dte_min: int = 2
+    dte_min: int = 1                  # Phase 11: was 2; relax to capture
+                                       # +Rs 10,071 hypothetical edge
     dte_spread_switch: int = 3
 
     sl_pct: float = 0.30
@@ -72,9 +73,12 @@ class TrendPullbackTactic(Tactic):
         if state.adx_15m < cfg.adx_min_15m:
             return None
 
-        if state.regime == "TREND_UP":
+        # Phase 11: also fire on gap-trend regimes — the classifier was
+        # rejecting ~Rs 18k of hypothetical winners by being too strict
+        # about which trend label was active.
+        if state.regime in ("TREND_UP", "TREND_UP_GAP"):
             return self._evaluate_long(state)
-        if state.regime == "TREND_DOWN":
+        if state.regime in ("TREND_DOWN", "TREND_DOWN_GAP"):
             return self._evaluate_short(state)
         return None
 
@@ -188,7 +192,7 @@ class TrendPullbackTactic(Tactic):
 
         if direction == "CE":
             gates["regime_is_TREND_UP"] = GateResult(
-                s.regime == "TREND_UP", s.regime, "TREND_UP",
+                s.regime in ("TREND_UP", "TREND_UP_GAP"), s.regime, "TREND_UP / TREND_UP_GAP",
                 f"regime={s.regime}",
             )
             ratio = s.pe_oi_change / s.ce_oi_change if s.ce_oi_change > 0 else 0.0
@@ -226,7 +230,7 @@ class TrendPullbackTactic(Tactic):
             )
         else:  # PE
             gates["regime_is_TREND_DOWN"] = GateResult(
-                s.regime == "TREND_DOWN", s.regime, "TREND_DOWN",
+                s.regime in ("TREND_DOWN", "TREND_DOWN_GAP"), s.regime, "TREND_DOWN / TREND_DOWN_GAP",
                 f"regime={s.regime}",
             )
             ratio = s.ce_oi_change / s.pe_oi_change if s.pe_oi_change > 0 else 0.0

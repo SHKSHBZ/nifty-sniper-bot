@@ -265,21 +265,23 @@ class IEFAnalyzer:
     # ----- Helpers ----------------------------------------------------
 
     @staticmethod
-    def golden_zone(swing_start_price: float, swing_end_price: float
+    def golden_zone(swing_start_price: float, swing_end_price: float,
+                    fib_low: float = 0.618, fib_high: float = 0.786
                     ) -> tuple[float, float]:
         """
-        Returns (low, high) of the 0.618 - 0.786 retracement from the
-        impulse leg start_price -> end_price.
+        Returns (low, high) of the retracement zone bounded by the two
+        Fibonacci levels (default Golden Zone 0.618-0.786). The zone is
+        always (lower-price, higher-price).
         """
         diff = abs(swing_end_price - swing_start_price)
         if swing_end_price > swing_start_price:
             # bullish leg, retracement is below swing_end
-            zone_low = swing_end_price - 0.786 * diff
-            zone_high = swing_end_price - 0.618 * diff
+            zone_low = swing_end_price - fib_high * diff
+            zone_high = swing_end_price - fib_low * diff
         else:
             # bearish leg, retracement is above swing_end
-            zone_low = swing_end_price + 0.618 * diff
-            zone_high = swing_end_price + 0.786 * diff
+            zone_low = swing_end_price + fib_low * diff
+            zone_high = swing_end_price + fib_high * diff
         return (zone_low, zone_high)
 
 
@@ -293,7 +295,11 @@ class IEFConfig(TacticConfig):
     min_history_bars: int = 25         # need enough bars for swings + CHoCH
     choch_lookback_bars: int = 20      # CHoCH must be within this many bars
     require_ob_or_fvg_confluence: bool = True
-    dte_min: int = 2
+    # Golden Zone bounds (Phase 11 evidence: stricter 0.618-0.786 was over-
+    # rejecting +Rs 15,223 of hypothetical winners; widen to 0.50-0.886).
+    fib_low: float = 0.50
+    fib_high: float = 0.886
+    dte_min: int = 1                    # Phase 11: was 2; relax to 1
     sl_pct: float = 0.30
     tp_pct: float = 0.50
     time_stop_min: int = 120
@@ -344,14 +350,20 @@ class IEFTactic(Tactic):
             for s in analysis.swings:
                 if s.side == "low" and s.idx <= choch.idx:
                     impulse_start = s.price
-            zone = self.analyzer.golden_zone(impulse_start, choch.broken_pivot_price)
+            zone = self.analyzer.golden_zone(
+                impulse_start, choch.broken_pivot_price,
+                fib_low=cfg.fib_low, fib_high=cfg.fib_high,
+            )
             return self._evaluate_long(state, bars, analysis, choch, zone)
         else:  # down
             impulse_start = analysis.swings[0].price if analysis.swings else bars[0].high
             for s in analysis.swings:
                 if s.side == "high" and s.idx <= choch.idx:
                     impulse_start = s.price
-            zone = self.analyzer.golden_zone(impulse_start, choch.broken_pivot_price)
+            zone = self.analyzer.golden_zone(
+                impulse_start, choch.broken_pivot_price,
+                fib_low=cfg.fib_low, fib_high=cfg.fib_high,
+            )
             return self._evaluate_short(state, bars, analysis, choch, zone)
 
     def _evaluate_long(
@@ -497,7 +509,10 @@ class IEFTactic(Tactic):
             impulse_start = next((s.price for s in reversed(analysis.swings)
                                   if s.side == "low" and s.idx <= choch.idx),
                                  bars[0].low)
-            zone = self.analyzer.golden_zone(impulse_start, choch.broken_pivot_price)
+            zone = self.analyzer.golden_zone(
+                impulse_start, choch.broken_pivot_price,
+                fib_low=cfg.fib_low, fib_high=cfg.fib_high,
+            )
             gates["choch_direction_match"] = GateResult(
                 True, "up", "up", "CHoCH side matches CE direction",
             )
@@ -527,7 +542,10 @@ class IEFTactic(Tactic):
             impulse_start = next((s.price for s in reversed(analysis.swings)
                                   if s.side == "high" and s.idx <= choch.idx),
                                  bars[0].high)
-            zone = self.analyzer.golden_zone(impulse_start, choch.broken_pivot_price)
+            zone = self.analyzer.golden_zone(
+                impulse_start, choch.broken_pivot_price,
+                fib_low=cfg.fib_low, fib_high=cfg.fib_high,
+            )
             gates["choch_direction_match"] = GateResult(
                 True, "down", "down", "CHoCH side matches PE direction",
             )
