@@ -28,6 +28,9 @@ import pandas as pd
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+# Import TacticTrade so pickle can resolve the class on load
+from backtesting.run_all_tactics import TacticTrade  # noqa: E402, F401
+
 
 PICKLE = ROOT / "reports" / "phase9_tactic_trades.pkl"
 REPORT = ROOT / "reports" / "phase10_trend_pullback_validation.md"
