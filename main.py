@@ -17,6 +17,7 @@ from regime.market_hours import (
 from journal import JournalRecorder, write_daily_report, analyze_trade
 from journal.models import ExecutedTrade
 from journal.missed_tracker import LiveMissedTracker
+from journal.state_publisher import StatePublisher
 
 # Create logs directory
 Path("logs").mkdir(exist_ok=True)
@@ -83,6 +84,13 @@ class LiveOrchestrator:
             ) if self.journal is not None else None
         )
         self._last_nm_probe_ts: datetime | None = None
+        # Publish bot state to disk so the dashboard backend (a separate
+        # process) can render live indicators. File-based IPC keeps the
+        # bot decoupled from the web layer.
+        self.state_publisher = StatePublisher(
+            Path(__file__).parent / "data", index_str,
+        )
+        self._last_signal: dict | None = None
         logger.info(f"[OK] Engine mode: {self.engine_mode}, "
                     f"Journal: {'ON' if self.journal_enabled else 'OFF'}")
 
@@ -129,6 +137,9 @@ class LiveOrchestrator:
                 # in try/except inside; never raises here.
                 if self.missed_tracker is not None and self._journal_day_started:
                     self.missed_tracker.tick(now)
+
+                # Publish current state for the dashboard backend.
+                self._publish_state(now)
 
                 # Force Time Gate exit at 14:30 IST
                 if t >= FORCE_FLAT_TIME:
@@ -282,6 +293,15 @@ class LiveOrchestrator:
         # live missed-tracker. Wrapped to never affect trading flow.
         for nm in signal.get('near_misses', []):
             self._register_near_miss_safely(nm)
+
+        # Capture the latest signal for the dashboard panel.
+        self._last_signal = {
+            "ts": now.isoformat(),
+            "direction": signal.get('direction'),
+            "tactic_name": signal.get('tactic_name'),
+            "reasons": signal.get('reasons', []),
+            "near_miss_count": len(signal.get('near_misses', [])),
+        }
 
         if signal['direction']:
             direction = signal['direction']
@@ -450,6 +470,99 @@ class LiveOrchestrator:
                         f"(prev_close={prev_close:.1f}, spot={spot:.1f})")
         except Exception as e:
             logger.warning(f"Journal start_day failed: {e}")
+
+    # --- Dashboard state publishing -----------------------------------
+
+    def _publish_state(self, now: datetime) -> None:
+        """Write current bot state to disk so the dashboard backend can
+        render it. Wrapped in try/except — never raises into trading flow."""
+        try:
+            snap = {}
+            if self.engine_mode == "regime":
+                try:
+                    snap = self.dispatcher.indicators.snapshot()
+                except Exception:
+                    snap = {}
+
+            spot = self.fetcher.get_spot()
+            try:
+                vix = self.fetcher.get_india_vix()
+            except Exception:
+                vix = 0.0
+            try:
+                focus_pcr = self.fetcher.get_focus_pcr()
+            except Exception:
+                focus_pcr = 0.0
+            try:
+                sup = self.fetcher.get_support()
+                res = self.fetcher.get_resistance()
+            except Exception:
+                sup, res = 0, 0
+            try:
+                oi = self.fetcher.get_oi_pattern()
+                ce_oi = oi.get("ce_oi_change", 0)
+                pe_oi = oi.get("pe_oi_change", 0)
+            except Exception:
+                ce_oi, pe_oi = 0, 0
+
+            regime = "UNKNOWN"
+            if self.engine_mode == "regime":
+                try:
+                    cur = self.dispatcher.classifier._current
+                    if cur is not None:
+                        regime = cur.value
+                except Exception:
+                    pass
+
+            pos = self.portfolio.get("open_position")
+            in_position = pos is not None
+
+            n_missed = 0
+            if self.journal is not None and self._journal_day_started:
+                try:
+                    n_missed = len(self.journal._day.missed) if self.journal._day else 0
+                except Exception:
+                    n_missed = 0
+
+            t = now.time()
+            is_market_open = MARKET_OPEN <= t < MARKET_CLOSE
+
+            engine_state = {
+                "index": self.trading_index,
+                "engine_mode": self.engine_mode,
+                "regime": regime,
+                "spot": float(spot or 0),
+                "vwap": float(snap.get("vwap", 0) or 0),
+                "ema9_5m": float(snap.get("ema9_5m", 0) or 0),
+                "ema21_5m": float(snap.get("ema21_5m", 0) or 0),
+                "atr_5m": float(snap.get("atr_5m", 0) or 0),
+                "day_open": float(snap.get("day_open", 0) or 0),
+                "day_high": float(snap.get("day_high", 0) or 0),
+                "day_low": float(snap.get("day_low", 0) or 0),
+                "or_high": float(snap.get("or_high", 0) or 0),
+                "or_low": float(snap.get("or_low", 0) or 0),
+                "focus_pcr": float(focus_pcr or 0),
+                "support_strike": int(sup or 0),
+                "resistance_strike": int(res or 0),
+                "vix_level": float(vix or 0),
+                "ce_oi_change": float(ce_oi or 0),
+                "pe_oi_change": float(pe_oi or 0),
+                "in_position": in_position,
+                "open_position": pos,
+                "last_signal": self._last_signal,
+                "missed_today_count": n_missed,
+                "is_market_open": is_market_open,
+                "journal_day_started": self._journal_day_started,
+            }
+            self.state_publisher.write_engine_state(engine_state)
+
+            if self.journal is not None and self._journal_day_started \
+                    and self.journal._day is not None:
+                self.state_publisher.write_missed_snapshot(
+                    list(self.journal._day.missed),
+                )
+        except Exception as e:
+            logger.debug(f"_publish_state failed: {e}")
 
     # --- Near-miss helpers ---------------------------------------------
 

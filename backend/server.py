@@ -1,3 +1,4 @@
+import asyncio
 import os
 import sys
 import subprocess
@@ -10,13 +11,16 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import Optional
 import requests as http_requests
 from urllib.parse import urlparse, parse_qs
 from dotenv import load_dotenv
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 import pytz
+
+from backend.live_quotes import IndicesCache
 
 # Load .env from project root
 load_dotenv(Path(__file__).parent.parent / ".env")
@@ -44,6 +48,49 @@ SESSION_FILE = BASE_DIR / "state" / "upstox_session.json"
 
 # --- Process Tracking ---
 tracked_pids = {"NIFTY": None, "SENSEX": None, "NIFTY_SCALPER": None, "SENSEX_SCALPER": None}
+
+# --- Live indices cache (1s TTL) ---
+indices_cache = IndicesCache(session_file=SESSION_FILE)
+
+
+# --- IPC file helpers ---
+
+def _engine_state_file(bot_type: str) -> Path:
+    """Resolve the on-disk engine_state file written by main.py for `bot_type`."""
+    bot = bot_type.upper()
+    # Scalper variants don't currently publish engine_state; fall through to
+    # the index-level file so the dashboard at least gets common state.
+    if bot in ("SENSEX", "SENSEX_SCALPER"):
+        return BASE_DIR / "data" / "engine_state_SENSEX.json"
+    return BASE_DIR / "data" / "engine_state_NIFTY.json"
+
+
+def _missed_today_file(bot_type: str) -> Path:
+    bot = bot_type.upper()
+    if bot in ("SENSEX", "SENSEX_SCALPER"):
+        return BASE_DIR / "data" / "missed_today_SENSEX.json"
+    return BASE_DIR / "data" / "missed_today_NIFTY.json"
+
+
+def _portfolio_file(bot_type: str) -> tuple[Path, float]:
+    bot = bot_type.upper()
+    if bot == "SENSEX_SCALPER":
+        return BASE_DIR / "data" / "scalper_portfolio_SENSEX.json", 300000.0
+    if bot == "NIFTY_SCALPER":
+        return BASE_DIR / "data" / "scalper_portfolio_NIFTY.json", 300000.0
+    if bot == "SENSEX":
+        return BASE_DIR / "data" / "paper_portfolio_SENSEX.json", 100000.0
+    return BASE_DIR / "data" / "paper_portfolio_NIFTY.json", 100000.0
+
+
+def _safe_load_json(path: Path, default):
+    try:
+        if not path.exists():
+            return default
+        with path.open("r") as fh:
+            return json.load(fh)
+    except Exception:
+        return default
 
 
 def find_running_bots():
@@ -289,6 +336,146 @@ def auth_submit(data: AuthSubmit):
         json.dump(session, f, indent=2)
 
     return {"message": "Authenticated", "is_authenticated": True}
+
+
+# --- Live indices ticker ---
+@app.get("/quotes/indices")
+def quotes_indices():
+    """Return LTP / change / change% for the configured set of indices.
+    Cached at IndicesCache TTL (default 1 s)."""
+    return {"quotes": indices_cache.get_all()}
+
+
+# --- Engine state (regime, spot, signal, etc.) ---
+@app.get("/engine/state/{bot_type}")
+def engine_state(bot_type: str):
+    """Return the latest engine_state JSON written by the bot. If the bot
+    is not running (or hasn't written yet), returns a minimal stub with
+    `available: false`."""
+    path = _engine_state_file(bot_type)
+    state = _safe_load_json(path, None)
+    if state is None:
+        return {
+            "available": False,
+            "bot_type": bot_type.upper(),
+            "message": "Bot has not published engine state yet (start the bot to populate).",
+        }
+    state["available"] = True
+    state["bot_type"] = bot_type.upper()
+    return state
+
+
+# --- Today's near-misses (live + finalised) ---
+@app.get("/near-miss/today/{bot_type}")
+def near_miss_today(bot_type: str):
+    path = _missed_today_file(bot_type)
+    payload = _safe_load_json(path, None)
+    if payload is None:
+        return {
+            "available": False,
+            "bot_type": bot_type.upper(),
+            "missed": [],
+        }
+    payload["available"] = True
+    payload["bot_type"] = bot_type.upper()
+    return payload
+
+
+# --- Today's P&L summary ---
+@app.get("/pnl/today/{bot_type}")
+def pnl_today(bot_type: str):
+    """Derive today's realized P&L + sparkline from the existing
+    paper_portfolio_<BOT>.json. Filters trade_history to today's date
+    (IST) and computes a cumulative P&L timeseries."""
+    portfolio_path, default_cap = _portfolio_file(bot_type)
+    portfolio = _safe_load_json(portfolio_path, None)
+    today_str = datetime.now(IST).date().isoformat()
+
+    if portfolio is None:
+        return {
+            "date": today_str, "bot_type": bot_type.upper(),
+            "starting_capital": default_cap, "current_capital": default_cap,
+            "realized_pnl": 0.0, "trade_count": 0, "win_count": 0,
+            "loss_count": 0, "trades": [], "pnl_timeseries": [],
+        }
+
+    capital_now = float(portfolio.get("capital", default_cap))
+    history = portfolio.get("trade_history", []) or []
+
+    today_trades = [
+        t for t in history
+        if (t.get("exit_time", "") or "")[:10] == today_str
+    ]
+
+    cumulative = 0.0
+    timeseries = []
+    realized = 0.0
+    wins = 0
+    losses = 0
+    for t in today_trades:
+        pnl = float(t.get("pnl", 0) or 0)
+        cumulative += pnl
+        realized += pnl
+        if pnl > 0:
+            wins += 1
+        elif pnl < 0:
+            losses += 1
+        timeseries.append({
+            "ts": t.get("exit_time", ""),
+            "pnl": pnl,
+            "cumulative_pnl": round(cumulative, 2),
+        })
+
+    return {
+        "date": today_str,
+        "bot_type": bot_type.upper(),
+        "starting_capital": round(capital_now - realized, 2),
+        "current_capital": round(capital_now, 2),
+        "realized_pnl": round(realized, 2),
+        "trade_count": len(today_trades),
+        "win_count": wins,
+        "loss_count": losses,
+        "trades": today_trades,
+        "pnl_timeseries": timeseries,
+    }
+
+
+# --- Live SSE stream — pushes everything every 1 second ---
+@app.get("/stream/{bot_type}")
+async def stream(bot_type: str):
+    """Server-Sent Events: emits one JSON event per second carrying the
+    indices ticker, engine state, missed-today snapshot, P&L summary,
+    and bot status. Frontend opens this with EventSource(...) and
+    avoids running 5 polling loops."""
+
+    async def event_gen():
+        # SSE retry hint (browser auto-reconnects after 3 s on disconnect)
+        yield "retry: 3000\n\n"
+        while True:
+            try:
+                payload = {
+                    "type": "tick",
+                    "ts": datetime.now(IST).isoformat(),
+                    "indices": indices_cache.get_all(),
+                    "engine_state": _safe_load_json(_engine_state_file(bot_type), None),
+                    "near_miss": _safe_load_json(_missed_today_file(bot_type), None),
+                    "pnl": pnl_today(bot_type),
+                    "status": get_status(),
+                }
+                yield f"data: {json.dumps(payload, default=str)}\n\n"
+            except Exception as e:
+                yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+            await asyncio.sleep(1.0)
+
+    return StreamingResponse(
+        event_gen(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
 
 
 # --- Health ---
