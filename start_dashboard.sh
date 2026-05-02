@@ -24,6 +24,18 @@ if [ ! -d "$ROOT/dashboard/node_modules" ]; then
   exit 1
 fi
 
+if [ ! -f "$ROOT/.env" ]; then
+  echo
+  echo "==============================================================="
+  echo "  WARNING: No .env file found."
+  echo "==============================================================="
+  echo "  The Upstox LOGIN button will not work until you create a .env"
+  echo "  file with UPSTOX_API_KEY, UPSTOX_API_SECRET, and"
+  echo "  UPSTOX_REDIRECT_URI. Copy .env.example to .env and fill in."
+  echo "==============================================================="
+  echo
+fi
+
 # --- Free the ports if anything's hogging them ---
 for port in "$BACKEND_PORT" "$FRONTEND_PORT"; do
   if lsof -ti tcp:"$port" >/dev/null 2>&1; then

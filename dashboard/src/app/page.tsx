@@ -51,6 +51,7 @@ export default function Dashboard() {
   const [logs, setLogs] = useState("");
   const [showAuthModal, setShowAuthModal] = useState(false);
   const [authUrl, setAuthUrl] = useState("");
+  const [authError, setAuthError] = useState("");
   const [redirectUrl, setRedirectUrl] = useState("");
   const [authLoading, setAuthLoading] = useState(false);
   const [loading, setLoading] = useState<Record<string, boolean>>({});
@@ -126,15 +127,39 @@ export default function Dashboard() {
   };
 
   const startLogin = async () => {
+    setAuthError("");
+    setAuthUrl("");
     try {
       const r = await fetch(`${apiBase}/auth/url`);
-      if (r.ok) {
-        const d = await r.json();
-        setAuthUrl(d.url);
-        window.open(d.url, "_blank");
+      if (!r.ok) {
+        let detail = "";
+        try {
+          const e = await r.json();
+          detail = e.detail || JSON.stringify(e);
+        } catch {
+          detail = await r.text();
+        }
+        setAuthError(
+          `Backend returned ${r.status}. ${detail || ""} ` +
+            "Check that your .env has UPSTOX_API_KEY, UPSTOX_API_SECRET, and UPSTOX_REDIRECT_URI."
+        );
+        return;
       }
-    } catch {
-      alert("Cannot reach server. Check connection.");
+      const d = await r.json();
+      setAuthUrl(d.url);
+      // Try to open in new tab; popup blockers may block it after the
+      // async/await, but the URL is also rendered as a clickable link
+      // in the modal below so the user can always proceed manually.
+      try {
+        window.open(d.url, "_blank", "noopener");
+      } catch {
+        // Ignore — link in modal handles the manual case
+      }
+    } catch (e) {
+      setAuthError(
+        `Cannot reach backend at ${apiBase}. Is the "Sniper Backend" window still open? ` +
+          (e instanceof Error ? e.message : String(e))
+      );
     }
   };
 
@@ -421,21 +446,39 @@ export default function Dashboard() {
                 <p className="text-xs text-slate-400">Connect your broker account</p>
               </div>
               {!authUrl ? (
-                <button
-                  onClick={startLogin}
-                  className="w-full py-4 bg-blue-600 text-white font-bold rounded-2xl active:scale-95 transition-transform flex items-center justify-center gap-2"
-                >
-                  <ExternalLink className="w-5 h-5" /> OPEN UPSTOX LOGIN
-                </button>
+                <>
+                  <button
+                    onClick={startLogin}
+                    className="w-full py-4 bg-blue-600 text-white font-bold rounded-2xl active:scale-95 transition-transform flex items-center justify-center gap-2"
+                  >
+                    <ExternalLink className="w-5 h-5" /> OPEN UPSTOX LOGIN
+                  </button>
+                  {authError ? (
+                    <div className="p-3 bg-rose-500/10 border border-rose-500/20 rounded-xl text-rose-300 text-xs font-medium flex items-start gap-2">
+                      <XCircle className="w-4 h-4 mt-0.5 flex-shrink-0" />
+                      <span className="break-words">{authError}</span>
+                    </div>
+                  ) : null}
+                </>
               ) : (
                 <div className="space-y-3">
                   <div className="p-3 bg-emerald-500/10 border border-emerald-500/20 rounded-xl text-emerald-400 text-xs font-medium flex items-start gap-2">
                     <CheckCircle2 className="w-4 h-4 mt-0.5 flex-shrink-0" />
                     <span>
-                      Login page opened. Copy the URL from the address bar after
-                      logging in, then paste it below.
+                      If a new tab didn't open automatically (your browser may
+                      block popups), click the link below. After logging in,
+                      copy the full URL from the browser's address bar and
+                      paste it in the box.
                     </span>
                   </div>
+                  <a
+                    href={authUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="block w-full py-4 bg-blue-600 hover:bg-blue-500 text-white font-bold text-center rounded-2xl active:scale-95 transition-transform"
+                  >
+                    OPEN UPSTOX LOGIN PAGE →
+                  </a>
                   <input
                     type="text"
                     value={redirectUrl}

@@ -23,6 +23,28 @@ if not exist "dashboard\node_modules" (
   exit /b 1
 )
 
+REM .env check — the LOGIN button silently fails without this
+if not exist ".env" (
+  echo.
+  echo ===============================================================
+  echo   WARNING: No .env file found.
+  echo ===============================================================
+  echo.
+  echo   The Upstox LOGIN button will not work until you create a
+  echo   .env file with your API credentials.
+  echo.
+  echo   1. Copy .env.example to .env
+  echo   2. Open .env in Notepad
+  echo   3. Replace the three placeholder values with your real Upstox
+  echo      API key, secret, and redirect URI from
+  echo      https://account.upstox.com/developer/apps
+  echo.
+  echo   Press any key to start the dashboard anyway. You can fix
+  echo   .env later and restart this script.
+  echo.
+  pause
+)
+
 echo.
 echo ===============================================================
 echo   Starting Nifty Sniper Dashboard
