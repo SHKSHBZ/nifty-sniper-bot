@@ -141,7 +141,9 @@ class LiveOrchestrator:
                 # Publish current state for the dashboard backend.
                 self._publish_state(now)
 
-                # Force Time Gate exit at 14:30 IST
+                # Force Time Gate exit at 14:30 IST. New entries are blocked
+                # past this point inside _scan_for_entries (so scan polling +
+                # logging continue until market close at 15:30).
                 if t >= FORCE_FLAT_TIME:
                     if self.portfolio["open_position"]:
                         self._close_position("Time Exit (14:30 EOD)")
@@ -149,10 +151,6 @@ class LiveOrchestrator:
                         logger.info("Market Closed (15:30 IST). Shutting down.")
                         self._finalize_journal_day()
                         break
-                    # Post-14:30: position is flat and no new entries allowed.
-                    # Idle until market close to avoid re-entry loops.
-                    time.sleep(30)
-                    continue
 
                 if self.portfolio["open_position"]:
                     self._monitor_position(now)
@@ -276,7 +274,6 @@ class LiveOrchestrator:
     def _scan_for_entries(self, now):
         # `now` is already an IST tz-aware datetime supplied by run()
         if now.time() < ENTRY_WINDOW_OPEN: return
-        if now.time() >= FORCE_FLAT_TIME: return
 
         spot = self.fetcher.get_spot()
         sup = self.fetcher.get_support()
@@ -309,6 +306,16 @@ class LiveOrchestrator:
         }
 
         if signal['direction']:
+            # Block new entries after 14:30 EOD cutoff. The position would
+            # be force-closed on the next loop tick anyway, producing flat
+            # trades that just bleed brokerage. Log so the user can see
+            # what would have triggered.
+            if now.time() >= FORCE_FLAT_TIME:
+                logger.info(
+                    f"Signal {signal['direction']} blocked: post 14:30 EOD cutoff."
+                )
+                return
+
             direction = signal['direction']
             # We enforce Delta > 0.40 rule here
             # Buy ITM or slightly ATM depending on the wall
