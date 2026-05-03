@@ -38,7 +38,7 @@ export default function BotControl({
           >
             <div className="min-w-0 flex-1">
               <div className="font-bold text-sm md:text-base truncate">
-                {bot.replace("_SCALPER", " SCALPER")}
+                {bot}
               </div>
               <div
                 className={`text-[11px] font-bold uppercase tracking-wider ${

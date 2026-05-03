@@ -7,7 +7,7 @@ the new tactics (TrendPullback, ORB) we need EMA9, EMA21, ATR, OR levels
 and recent-bar history. This tracker maintains them incrementally from
 periodic spot updates, with no dependency on a heavy DataFrame at run time.
 
-Usage in the live loop (main.py / scalper_main.py):
+Usage in the live loop (main.py):
 
     tracker = IndicatorTracker()
     tracker.start_day(today, prev_day_close=24580.0)

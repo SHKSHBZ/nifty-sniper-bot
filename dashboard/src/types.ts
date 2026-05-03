@@ -149,4 +149,4 @@ export interface StreamTick {
   message?: string;
 }
 
-export type BotName = 'NIFTY' | 'SENSEX' | 'NIFTY_SCALPER' | 'SENSEX_SCALPER';
+export type BotName = 'NIFTY' | 'SENSEX';

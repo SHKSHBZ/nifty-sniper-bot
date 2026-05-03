@@ -47,7 +47,7 @@ LOG_DIR = BASE_DIR / "logs"
 SESSION_FILE = BASE_DIR / "state" / "upstox_session.json"
 
 # --- Process Tracking ---
-tracked_pids = {"NIFTY": None, "SENSEX": None, "NIFTY_SCALPER": None, "SENSEX_SCALPER": None}
+tracked_pids = {"NIFTY": None, "SENSEX": None}
 
 # --- Live indices cache (1s TTL) ---
 indices_cache = IndicesCache(session_file=SESSION_FILE)
@@ -58,26 +58,20 @@ indices_cache = IndicesCache(session_file=SESSION_FILE)
 def _engine_state_file(bot_type: str) -> Path:
     """Resolve the on-disk engine_state file written by main.py for `bot_type`."""
     bot = bot_type.upper()
-    # Scalper variants don't currently publish engine_state; fall through to
-    # the index-level file so the dashboard at least gets common state.
-    if bot in ("SENSEX", "SENSEX_SCALPER"):
+    if bot == "SENSEX":
         return BASE_DIR / "data" / "engine_state_SENSEX.json"
     return BASE_DIR / "data" / "engine_state_NIFTY.json"
 
 
 def _missed_today_file(bot_type: str) -> Path:
     bot = bot_type.upper()
-    if bot in ("SENSEX", "SENSEX_SCALPER"):
+    if bot == "SENSEX":
         return BASE_DIR / "data" / "missed_today_SENSEX.json"
     return BASE_DIR / "data" / "missed_today_NIFTY.json"
 
 
 def _portfolio_file(bot_type: str) -> tuple[Path, float]:
     bot = bot_type.upper()
-    if bot == "SENSEX_SCALPER":
-        return BASE_DIR / "data" / "scalper_portfolio_SENSEX.json", 300000.0
-    if bot == "NIFTY_SCALPER":
-        return BASE_DIR / "data" / "scalper_portfolio_NIFTY.json", 300000.0
     if bot == "SENSEX":
         return BASE_DIR / "data" / "paper_portfolio_SENSEX.json", 100000.0
     return BASE_DIR / "data" / "paper_portfolio_NIFTY.json", 100000.0
@@ -100,12 +94,7 @@ def find_running_bots():
         try:
             cmdline = proc.info.get('cmdline') or []
             cmd_str = " ".join(cmdline).lower()
-            if 'scalper_main.py' in cmd_str and 'python' in cmd_str:
-                if 'config_sensex' in cmd_str:
-                    found["SENSEX_SCALPER"] = proc.pid
-                else:
-                    found["NIFTY_SCALPER"] = proc.pid
-            elif 'main.py' in cmd_str and 'python' in cmd_str:
+            if 'main.py' in cmd_str and 'python' in cmd_str and 'scalper_main.py' not in cmd_str:
                 if 'config_sensex' in cmd_str:
                     found["SENSEX"] = proc.pid
                 else:
@@ -120,7 +109,7 @@ def find_running_bots():
 def get_status():
     discovered = find_running_bots()
     result = []
-    for name in ["NIFTY", "SENSEX", "NIFTY_SCALPER", "SENSEX_SCALPER"]:
+    for name in ["NIFTY", "SENSEX"]:
         pid = discovered.get(name) or tracked_pids.get(name)
         # Verify pid is still alive
         if pid:
@@ -141,7 +130,7 @@ def get_status():
 @app.post("/start/{bot_type}")
 def start_bot(bot_type: str):
     bot_type = bot_type.upper()
-    if bot_type not in ["NIFTY", "SENSEX", "NIFTY_SCALPER", "SENSEX_SCALPER"]:
+    if bot_type not in ["NIFTY", "SENSEX"]:
         raise HTTPException(400, "Invalid bot type")
 
     # Check if already running
@@ -150,11 +139,7 @@ def start_bot(bot_type: str):
         tracked_pids[bot_type] = discovered[bot_type]
         return {"message": f"{bot_type} already running", "pid": discovered[bot_type]}
 
-    if bot_type == "SENSEX_SCALPER":
-        cmd = [sys.executable, str(BASE_DIR / "scalper_main.py"), "config_sensex.json"]
-    elif bot_type == "NIFTY_SCALPER":
-        cmd = [sys.executable, str(BASE_DIR / "scalper_main.py")]
-    elif bot_type == "SENSEX":
+    if bot_type == "SENSEX":
         cmd = [sys.executable, str(BASE_DIR / "main.py"), "config_sensex.json"]
     else:
         cmd = [sys.executable, str(BASE_DIR / "main.py")]
@@ -196,13 +181,7 @@ def stop_bot(bot_type: str):
 @app.get("/stats/{bot_type}")
 def get_stats(bot_type: str):
     bot_type = bot_type.upper()
-    if bot_type == "SENSEX_SCALPER":
-        f = BASE_DIR / "data" / "scalper_portfolio_SENSEX.json"
-        cap = 300000
-    elif bot_type == "NIFTY_SCALPER":
-        f = BASE_DIR / "data" / "scalper_portfolio_NIFTY.json"
-        cap = 300000
-    elif bot_type == "SENSEX":
+    if bot_type == "SENSEX":
         f = BASE_DIR / "data" / "paper_portfolio_SENSEX.json"
         cap = 100000
     else:
@@ -234,12 +213,7 @@ def update_config(config: dict):
 # --- Logs ---
 @app.get("/logs/{bot_type}")
 def get_logs(bot_type: str, lines: int = 100):
-    if bot_type == "SENSEX_SCALPER":
-        prefix = "scalper_SENSEX_"
-    elif bot_type == "NIFTY_SCALPER":
-        prefix = "scalper_NIFTY_"
-    else:
-        prefix = "sniper_bot_"
+    prefix = "sniper_bot_"
     log_files = sorted(LOG_DIR.glob(f"{prefix}*.log"), reverse=True)
     if not log_files:
         return {"logs": "No log files found. Start the bot to generate logs."}

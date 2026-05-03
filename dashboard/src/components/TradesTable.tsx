@@ -117,11 +117,16 @@ function TradeCard({ t }: { t: Trade }) {
 
 function formatTime(ts: string): string {
   try {
-    return new Date(ts).toLocaleTimeString("en-IN", {
+    const d = new Date(ts);
+    const date = d.toLocaleDateString("en-IN", {
+      day: "2-digit",
+      month: "short",
+    });
+    const time = d.toLocaleTimeString("en-IN", {
       hour: "2-digit",
       minute: "2-digit",
-      second: "2-digit",
     });
+    return `${date} ${time}`;
   } catch {
     return ts;
   }
