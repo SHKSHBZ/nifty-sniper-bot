@@ -149,6 +149,10 @@ class LiveOrchestrator:
                         logger.info("Market Closed (15:30 IST). Shutting down.")
                         self._finalize_journal_day()
                         break
+                    # Post-14:30: position is flat and no new entries allowed.
+                    # Idle until market close to avoid re-entry loops.
+                    time.sleep(30)
+                    continue
 
                 if self.portfolio["open_position"]:
                     self._monitor_position(now)
@@ -272,6 +276,7 @@ class LiveOrchestrator:
     def _scan_for_entries(self, now):
         # `now` is already an IST tz-aware datetime supplied by run()
         if now.time() < ENTRY_WINDOW_OPEN: return
+        if now.time() >= FORCE_FLAT_TIME: return
 
         spot = self.fetcher.get_spot()
         sup = self.fetcher.get_support()
