@@ -275,6 +275,7 @@ class LiveOrchestrator:
 
         spot = self.fetcher.get_spot()
         sup = self.fetcher.get_support()
+        res = self.fetcher.get_resistance()
         focus_pcr = self.fetcher.get_focus_pcr()
 
         if spot == 0 or sup == 0: return
