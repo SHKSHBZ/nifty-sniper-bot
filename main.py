@@ -11,7 +11,7 @@ from signal_engine import SignalEngine
 from telegram_notifier import TelegramNotifier
 from regime import TacticDispatcher
 from regime.market_hours import (
-    IST, MARKET_OPEN, MARKET_CLOSE, ENTRY_WINDOW_OPEN, FORCE_FLAT_TIME,
+    IST, MARKET_OPEN, MARKET_CLOSE, ENTRY_WINDOW_OPEN,
     next_market_open,
 )
 from journal import JournalRecorder, write_daily_report, analyze_trade
@@ -141,14 +141,15 @@ class LiveOrchestrator:
                 # Publish current state for the dashboard backend.
                 self._publish_state(now)
 
-                # Force Time Gate exit at 14:30 IST
-                if t >= FORCE_FLAT_TIME:
+                # At market close (15:30 IST): flatten any open position
+                # and shut down. New entries are allowed all the way up to
+                # the close — no earlier cutoff.
+                if t >= MARKET_CLOSE:
                     if self.portfolio["open_position"]:
-                        self._close_position("Time Exit (14:30 EOD)")
-                    if t >= MARKET_CLOSE:
-                        logger.info("Market Closed (15:30 IST). Shutting down.")
-                        self._finalize_journal_day()
-                        break
+                        self._close_position("Market Close (15:30 IST)")
+                    logger.info("Market Closed (15:30 IST). Shutting down.")
+                    self._finalize_journal_day()
+                    break
 
                 if self.portfolio["open_position"]:
                     self._monitor_position(now)
