@@ -1,76 +1,11 @@
 @echo off
-REM Start the Nifty Sniper Dashboard on Windows.
-REM Opens two separate windows: one for the backend, one for the frontend.
-REM Close either window to stop that side.
-REM
-REM Double-click this file, OR type start_dashboard.bat in Command Prompt.
+title Sniper Command Center
+echo Starting Nifty Sniper Web Dashboard...
+start "Dashboard UI" cmd /k "python run_dashboard.py"
 
-setlocal
+echo Starting Sensex Scalper Node...
+start "Sensex Scalper Bot (Live)" cmd /k "python scalper_main.py config_sensex.json"
 
-cd /d "%~dp0"
-
-REM --- Pre-flight checks ---
-python -c "import fastapi" 2>nul
-if errorlevel 1 (
-  echo ERROR: fastapi not installed. Run setup_dashboard.bat first.
-  pause
-  exit /b 1
-)
-
-if not exist "dashboard\node_modules" (
-  echo ERROR: dashboard\node_modules missing. Run setup_dashboard.bat first.
-  pause
-  exit /b 1
-)
-
-REM .env check — the LOGIN button silently fails without this
-if not exist ".env" (
-  echo.
-  echo ===============================================================
-  echo   WARNING: No .env file found.
-  echo ===============================================================
-  echo.
-  echo   The Upstox LOGIN button will not work until you create a
-  echo   .env file with your API credentials.
-  echo.
-  echo   1. Copy .env.example to .env
-  echo   2. Open .env in Notepad
-  echo   3. Replace the three placeholder values with your real Upstox
-  echo      API key, secret, and redirect URI from
-  echo      https://account.upstox.com/developer/apps
-  echo.
-  echo   Press any key to start the dashboard anyway. You can fix
-  echo   .env later and restart this script.
-  echo.
-  pause
-)
-
-echo.
-echo ===============================================================
-echo   Starting Nifty Sniper Dashboard
-echo ===============================================================
-echo.
-echo  Backend will open in a new window on http://localhost:8000
-echo  Frontend will open in a new window on http://localhost:3000
-echo.
-echo  Close either window to stop that side.
-echo.
-echo  Once both are running, open in your browser:
-echo      http://localhost:3000
-echo.
-echo ===============================================================
-echo.
-
-REM --- Start backend in its own window ---
-start "Sniper Backend" cmd /k "cd /d ""%~dp0"" && python -m uvicorn backend.server:app --host 0.0.0.0 --port 8000"
-
-REM Give backend ~3 seconds to come up before starting frontend
-timeout /t 3 /nobreak >nul
-
-REM --- Start frontend in its own window ---
-start "Sniper Frontend" cmd /k "cd /d ""%~dp0\dashboard"" && npx next dev -p 3000"
-
-echo Both servers are starting in separate windows.
-echo Wait ~10 seconds, then open http://localhost:3000 in your browser.
-echo.
+echo "Command Center launched! Both scripts are opening in separate windows."
+echo "You can view the scalper's log directly on the dashboard or in the new window."
 pause
