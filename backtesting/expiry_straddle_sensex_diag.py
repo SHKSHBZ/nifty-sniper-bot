@@ -7,10 +7,16 @@ Step 2: re-run S2 (SL-only, no TP — best NIFTY config) across several
 """
 from __future__ import annotations
 
+import sys
 from datetime import time as dtime
 from pathlib import Path
 
 import pandas as pd
+
+# Allow running from repo root OR from inside backtesting/
+_HERE = Path(__file__).resolve().parent
+if _HERE.name == "backtesting":
+    sys.path.insert(0, str(_HERE.parent))
 
 import backtesting.expiry_straddle_sensex as base
 

@@ -10,10 +10,16 @@ spot drift, premium decay, OI shifts -- all in one chain-shaped view.
 """
 from __future__ import annotations
 
+import sys
 from datetime import time as dtime
 from pathlib import Path
 
 import pandas as pd
+
+# Allow running from repo root OR from inside backtesting/
+_HERE = Path(__file__).resolve().parent
+if _HERE.name == "backtesting":
+    sys.path.insert(0, str(_HERE.parent))
 
 import backtesting.expiry_straddle_sensex as base
 
