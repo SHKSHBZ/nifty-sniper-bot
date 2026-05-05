@@ -275,7 +275,7 @@ def main():
              "- **S2 SL−50%**: close both legs at −50% combined return",
              "- **S3 TP+SL**: both bumpers\n",
              "## Headline\n", "```", df.to_string(index=False), "```", ""]
-    out.write_text("\n".join(lines))
+    out.write_text("\n".join(lines), encoding="utf-8")
     print(f"\nWrote {out}")
     print("\n", df.to_string(index=False))
 
