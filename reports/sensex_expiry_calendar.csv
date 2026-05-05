@@ -27,12 +27,13 @@ expiry_date,weekday,phase_rule,shifted_from_holiday,regular_day_was
 2024-10-31,Thursday,Friday-weekly,True,2024-11-01
 2024-11-08,Friday,Friday-weekly,False,
 2024-11-14,Thursday,Friday-weekly,True,2024-11-15
-2024-11-26,Tuesday,Tuesday-weekly,False,
-2024-12-03,Tuesday,Tuesday-weekly,False,
-2024-12-10,Tuesday,Tuesday-weekly,False,
-2024-12-17,Tuesday,Tuesday-weekly,False,
-2024-12-24,Tuesday,Tuesday-weekly,False,
-2024-12-31,Tuesday,Tuesday-weekly,False,
+2024-11-22,Friday,Friday-weekly,False,
+2024-11-29,Friday,Friday-weekly,False,
+2024-12-06,Friday,Friday-weekly,False,
+2024-12-13,Friday,Friday-weekly,False,
+2024-12-20,Friday,Friday-weekly,False,
+2024-12-27,Friday,Friday-weekly,False,
+2025-01-03,Friday,Friday-legacy-carry-over,False,
 2025-01-07,Tuesday,Tuesday-weekly,False,
 2025-01-14,Tuesday,Tuesday-weekly,False,
 2025-01-21,Tuesday,Tuesday-weekly,False,
@@ -86,7 +87,7 @@ expiry_date,weekday,phase_rule,shifted_from_holiday,regular_day_was
 2025-12-24,Wednesday,Thursday-weekly,True,2025-12-25
 2026-01-01,Thursday,Thursday-weekly,False,
 2026-01-08,Thursday,Thursday-weekly,False,
-2026-01-15,Thursday,Thursday-weekly,False,
+2026-01-14,Wednesday,Thursday-weekly,True,2026-01-15
 2026-01-22,Thursday,Thursday-weekly,False,
 2026-01-29,Thursday,Thursday-weekly,False,
 2026-02-05,Thursday,Thursday-weekly,False,
@@ -96,7 +97,7 @@ expiry_date,weekday,phase_rule,shifted_from_holiday,regular_day_was
 2026-03-05,Thursday,Thursday-weekly,False,
 2026-03-12,Thursday,Thursday-weekly,False,
 2026-03-19,Thursday,Thursday-weekly,False,
-2026-03-26,Thursday,Thursday-weekly,False,
+2026-03-25,Wednesday,Thursday-weekly,True,2026-03-26
 2026-04-02,Thursday,Thursday-weekly,False,
 2026-04-09,Thursday,Thursday-weekly,False,
 2026-04-16,Thursday,Thursday-weekly,False,

@@ -1,18 +1,17 @@
 """Generate SENSEX weekly-expiry calendar for the last 2 years.
 
-SENSEX weekly-expiry-day history (per SEBI / BSE notifications):
+SENSEX weekly-expiry-day history (per BSE notifications, corrected):
 
-  * Up to 2024-11-19 : FRIDAY  (BSE original weekly expiry)
-  * 2024-11-20 -> :   TUESDAY  (post SEBI "one weekly expiry per
-                                exchange" rule)
-  * 2025-09-01 -> :   THURSDAY (BSE moved when NSE took Tuesday)
+  * Up to 2024-12-31 : FRIDAY  (BSE original weekly expiry)
+  * 2025-01-01 -> :   TUESDAY  (BSE realignment after SEBI's
+                                one-weekly-per-exchange rule)
+  * 2025-09-01 -> :   THURSDAY (BSE moved to Thu when NSE took Tue)
 
-If any of those cutovers don't match what you remember, edit the
-PHASES dict below and re-run.
+Legacy exception: Friday 2025-01-03 was a one-off Friday expiry
+(carry-over of a contract created before the rule change).
 
 Holidays where the regular expiry day is a market holiday: BSE
-shifts the expiry to the previous trading day. We list known
-Indian-market holidays for 2024-2026 and shift accordingly.
+shifts the expiry to the previous trading day.
 
 Output: reports/sensex_expiry_calendar.csv
 """
@@ -32,9 +31,13 @@ WINDOW_END = date(2026, 5, 5)
 # (start_date_inclusive, weekday_index_0_mon_to_6_sun)
 PHASES = [
     (date(2024, 1, 1),  4),  # Friday
-    (date(2024, 11, 20), 1),  # Tuesday
+    (date(2025, 1, 1),  1),  # Tuesday
     (date(2025, 9, 1),  3),  # Thursday
 ]
+
+# One-off legacy contracts that kept their original expiry day after
+# a phase change.
+LEGACY_EXCEPTIONS = {date(2025, 1, 3): "Friday-legacy-carry-over"}
 
 # Indian market holidays (NSE/BSE — same list). Source: NSE holiday
 # list 2024 + 2025 + 2026.
@@ -72,13 +75,16 @@ HOLIDAYS = {
     date(2025, 11, 5),  # Guru Nanak
     date(2025, 12, 25), # Christmas
     # 2026
+    date(2026, 1, 15),  # Local festival (per BSE 2026 calendar)
     date(2026, 1, 26),  # Republic Day
     date(2026, 2, 17),  # Mahashivratri
     date(2026, 3, 4),   # Holi
+    date(2026, 3, 26),  # Eid-ul-Fitr observed
     date(2026, 3, 31),  # Eid-ul-Fitr
     date(2026, 4, 3),   # Good Friday
     date(2026, 4, 14),  # Ambedkar Jayanti
     date(2026, 5, 1),   # May Day
+    date(2026, 5, 28),  # Bakri Eid
 }
 
 
@@ -106,6 +112,18 @@ def main():
     rows = []
     cur = WINDOW_START
     seen: set[date] = set()
+    # Inject legacy exceptions first
+    for legacy_date, note in LEGACY_EXCEPTIONS.items():
+        if WINDOW_START <= legacy_date <= WINDOW_END:
+            rows.append({
+                "expiry_date": legacy_date.strftime("%Y-%m-%d"),
+                "weekday": legacy_date.strftime("%A"),
+                "phase_rule": note,
+                "shifted_from_holiday": False,
+                "regular_day_was": "",
+            })
+            seen.add(legacy_date)
+
     while cur <= WINDOW_END:
         wd_target = expiry_weekday_for(cur)
         if cur.weekday() == wd_target:
@@ -128,6 +146,7 @@ def main():
                 "regular_day_was": cur.strftime("%Y-%m-%d") if shifted else "",
             })
         cur += timedelta(days=1)
+    rows.sort(key=lambda r: r["expiry_date"])
 
     df = pd.DataFrame(rows)
     out = base.REPORTS_DIR / "sensex_expiry_calendar.csv"
