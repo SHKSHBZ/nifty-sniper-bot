@@ -43,6 +43,12 @@ SUSTAIN_INTERVAL = 5    # Minutes between each candle close check
 # Focus Zone PCR thresholds
 FOCUS_PCR_BULLISH_THRESHOLD = 1.1    # PCR above this = bullish (heavy Put writing)
 FOCUS_PCR_BEARISH_THRESHOLD = 0.85   # PCR below this = bearish (heavy Call writing)
+# Gate 2 entry thresholds (tighter than the bias labels above):
+# CE entries require *strictly bullish* PCR (writers actively defending support).
+# PE entries are permissive — allow on mildly-bearish days too, since
+# resistance rejections often happen before PCR fully tips bearish.
+FOCUS_PCR_CE_ENTRY_MIN  = 1.10   # CE only when PCR confirms bullish flow
+FOCUS_PCR_PE_ENTRY_MAX  = 0.95   # PE allowed on neutral-to-bearish PCR
 
 # ---------------------------------------------------------------------------
 # Gate 1: Spot Sustain Check
@@ -253,11 +259,14 @@ class SignalEngine:
                 else:
                     reasons.append(f"✅ GATE 0 PASS: VIX={india_vix:.2f} supports CE entries.")
 
-                    # --- GATE 2: Focus Zone PCR must NOT be bearish ---
-                    if pcr_bias != "bearish":
+                    # --- GATE 2: Strict bullish PCR for CE entries ---
+                    # Tightened: was "not bearish" (>0.85). Now requires
+                    # PCR >= 1.10 so that a neutral-PCR support test
+                    # doesn't trigger a blind CE buy.
+                    if focus_pcr >= FOCUS_PCR_CE_ENTRY_MIN:
                         reasons.append(
-                            f"✅ GATE 2 PASS: Focus PCR={focus_pcr:.2f} ({pcr_bias}) "
-                            f"supports CE entry."
+                            f"✅ GATE 2 PASS: Focus PCR={focus_pcr:.2f} (bullish, "
+                            f">= {FOCUS_PCR_CE_ENTRY_MIN:.2f}) confirms CE entry."
                         )
 
                         # --- GATE 3: OI Build-Up Confirmation ---
@@ -269,8 +278,9 @@ class SignalEngine:
                             reasons.append(f"❌ GATE 3 FAIL: {oi_reason}")
                     else:
                         reasons.append(
-                            f"❌ GATE 2 FAIL: Focus PCR={focus_pcr:.2f} ({pcr_bias}). "
-                            f"Bearish flow contradicts CE entry at support."
+                            f"❌ GATE 2 FAIL: Focus PCR={focus_pcr:.2f} below "
+                            f"{FOCUS_PCR_CE_ENTRY_MIN:.2f}. Need strict bullish flow "
+                            f"to take CE at support."
                         )
             else:
                 time_req = "0m" if scalp_mode else f"{SUSTAIN_TICKS}x 5m candles"
@@ -300,11 +310,14 @@ class SignalEngine:
                 else:
                     reasons.append(f"✅ GATE 0 PASS: VIX={india_vix:.2f} supports PE entries.")
 
-                    # --- GATE 2: Focus Zone PCR must NOT be bullish ---
-                    if pcr_bias != "bullish":
+                    # --- GATE 2: Permissive PCR for PE entries ---
+                    # Loosened: was "not bullish" (<1.10). Now requires
+                    # PCR <= 0.95 — slightly tilted bearish OR call writers
+                    # already starting to defend resistance.
+                    if focus_pcr <= FOCUS_PCR_PE_ENTRY_MAX:
                         reasons.append(
-                            f"✅ GATE 2 PASS: Focus PCR={focus_pcr:.2f} ({pcr_bias}) "
-                            f"supports PE entry."
+                            f"✅ GATE 2 PASS: Focus PCR={focus_pcr:.2f} "
+                            f"(<= {FOCUS_PCR_PE_ENTRY_MAX:.2f}) supports PE at resistance."
                         )
 
                         # --- GATE 3: OI Build-Up Confirmation ---
@@ -316,8 +329,9 @@ class SignalEngine:
                             reasons.append(f"❌ GATE 3 FAIL: {oi_reason}")
                     else:
                         reasons.append(
-                            f"❌ GATE 2 FAIL: Focus PCR={focus_pcr:.2f} ({pcr_bias}). "
-                            f"Bullish flow contradicts PE entry at resistance."
+                            f"❌ GATE 2 FAIL: Focus PCR={focus_pcr:.2f} above "
+                            f"{FOCUS_PCR_PE_ENTRY_MAX:.2f}. Put writers still active; "
+                            f"PE at resistance not safe."
                         )
             else:
                 time_req = "0m" if scalp_mode else f"{SUSTAIN_TICKS}x 5m candles"

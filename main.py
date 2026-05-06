@@ -415,7 +415,7 @@ class LiveOrchestrator:
 
         self.portfolio["capital"] += pnl
 
-        exit_time = datetime.now()
+        exit_time = datetime.now(IST)
         record = {
             "entry_time": pos['entry_time'],
             "exit_time": exit_time.isoformat(),
@@ -616,7 +616,7 @@ class LiveOrchestrator:
 
             realized = sum(
                 t.get("pnl", 0.0) for t in self.portfolio["trade_history"]
-                if t.get("exit_time", "")[:10] == datetime.now().date().isoformat()
+                if t.get("exit_time", "")[:10] == datetime.now(IST).date().isoformat()
             )
             day_record = self.journal.end_day(
                 realized_pnl=realized,

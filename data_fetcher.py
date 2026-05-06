@@ -7,6 +7,7 @@ import os
 import upstox_client
 from collections import deque
 from datetime import datetime, timedelta
+from regime.market_hours import IST
 
 logger = logging.getLogger("DataFetcher")
 
@@ -255,8 +256,9 @@ class DataFetcher:
             atm = min(strikes, key=lambda x: abs(x - spot))
             focus_zone = [atm + (i * self.strike_step) for i in range(-3, 4)]
             
-            today = datetime.now().strftime("%Y-%m-%d")
-            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            now_ist = datetime.now(IST)
+            today = now_ist.strftime("%Y-%m-%d")
+            timestamp = now_ist.strftime("%Y-%m-%d %H:%M:%S")
             index_name = self.trading_index.lower()
             csv_path = f"logs/focus_zone_{index_name}_{today}.csv"
             
