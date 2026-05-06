@@ -58,7 +58,8 @@ SENSEX_KEY = "BSE_INDEX|SENSEX"
 
 # Tunables
 STRIKE_STEP = 100
-STRIKES_EITHER_SIDE = 5    # 11 strikes total (ATM and ±5)
+STRIKES_EITHER_SIDE = 10   # 21 strikes total (ATM and ±10) — wider chain
+                           # for premium-richness analysis. Was 5.
 SPOT_BULK_CHUNK_DAYS = 30  # historical-candle 1-min limit per call
 SLEEP_SECONDS = 0.5
 ENTRY_HHMM = "14:50"
