@@ -17,10 +17,15 @@ config/
 state/
 
 # Data and Logs
-# Ignore everything in data/ except CSVs we commit for backtesting samples
+# Ignore everything in data/ except a small set of curated CSVs.
+# Per-strike historical option data (*_1min.csv) and index/VIX spot
+# series (*_1minute.csv) are regenerable from the Upstox API, so we
+# don't track them — too large for git, and cause noisy diffs.
 data/*
 !data/*.csv
 !data/.gitkeep
+data/*_1min.csv
+data/*_1minute.csv
 historical/
 *.log
 *.txt
