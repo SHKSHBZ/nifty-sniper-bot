@@ -37,7 +37,10 @@ logger = logging.getLogger("LiveBot")
 # Determine which index is running based on config passed
 index_str = "SENSEX" if (len(sys.argv) > 1 and "sensex" in sys.argv[1].lower()) else "NIFTY"
 
-PORTFOLIO_FILE = Path(f"data/paper_portfolio_{index_str}.json")
+# PORTFOLIO_FILE is set per-instance in LiveOrchestrator.__init__ now,
+# so legacy and regime engines can run side-by-side without overwriting
+# each other's portfolios. Legacy keeps the old filename (no break for
+# the dashboard backend); regime gets a _regime suffix.
 
 class LiveOrchestrator:
     def __init__(self, config_file="project_config.json"):
@@ -63,10 +66,17 @@ class LiveOrchestrator:
         self.fetcher = DataFetcher(self.config)
         self.engine = SignalEngine()
         self.telegram = TelegramNotifier()
+
+        # --- Portfolio path: legacy keeps old name, regime gets suffix ---
+        # so two engines can run side-by-side on the same index.
+        self.engine_mode = self.config.get("engine_mode", "legacy")
+        if self.engine_mode == "regime":
+            self.portfolio_file = Path(f"data/paper_portfolio_{index_str}_regime.json")
+        else:
+            self.portfolio_file = Path(f"data/paper_portfolio_{index_str}.json")
         self.load_portfolio()
 
         # --- Regime dispatcher + Journal (config-flagged) ---
-        self.engine_mode = self.config.get("engine_mode", "legacy")
         self.dispatcher = TacticDispatcher(
             mode=self.engine_mode, strike_step=self.strike_step,
         )
@@ -109,15 +119,15 @@ class LiveOrchestrator:
         logger.info("[OK] Live Chain Data Flowing.")
 
     def load_portfolio(self):
-        if PORTFOLIO_FILE.exists():
-            with open(PORTFOLIO_FILE, "r") as f:
+        if self.portfolio_file.exists():
+            with open(self.portfolio_file, "r") as f:
                 self.portfolio = json.load(f)
         else:
             self.portfolio = {"capital": 100000.0, "open_position": None, "trade_history": []}
 
     def save_portfolio(self):
-        PORTFOLIO_FILE.parent.mkdir(exist_ok=True)
-        with open(PORTFOLIO_FILE, "w") as f:
+        self.portfolio_file.parent.mkdir(exist_ok=True)
+        with open(self.portfolio_file, "w") as f:
             json.dump(self.portfolio, f, indent=4)
 
     def run(self):
