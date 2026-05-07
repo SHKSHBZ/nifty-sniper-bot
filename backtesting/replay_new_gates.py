@@ -151,7 +151,7 @@ def main():
           f"PE [{PCR_PE_LOW:.2f}-{PCR_PE_HIGH:.2f}]")
     print("=" * 72)
     total = 0
-    for date in ("2026-05-05", "2026-05-06"):
+    for date in ("2026-05-05", "2026-05-06", "2026-05-07"):
         print(f"\n--- {date} ---")
         for idx, lot in (("nifty", 65), ("sensex", 20)):
             path = f"logs/focus_zone_{idx}_{date}.csv"
