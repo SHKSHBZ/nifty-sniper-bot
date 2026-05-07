@@ -23,19 +23,23 @@ from journal.state_publisher import StatePublisher
 Path("logs").mkdir(exist_ok=True)
 todays_date = datetime.now(IST).strftime("%Y-%m-%d")
 
+# Determine which bot variant is running based on config arg passed.
+# Each variant gets its own log file so 4 parallel bots don't interleave.
+index_str = "SENSEX" if (len(sys.argv) > 1 and "sensex" in sys.argv[1].lower()) else "NIFTY"
+_is_regime_arg = (len(sys.argv) > 1 and "_regime" in sys.argv[1].lower())
+_log_suffix = "_regime" if _is_regime_arg else ""
+log_file_path = f"logs/sniper_bot_{index_str}{_log_suffix}_{todays_date}.log"
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s | %(levelname)s | %(message)s',
     datefmt='%H:%M:%S',
     handlers=[
-        logging.FileHandler(f"logs/sniper_bot_{todays_date}.log", encoding="utf-8"),
+        logging.FileHandler(log_file_path, encoding="utf-8"),
         logging.StreamHandler(sys.stdout)
     ]
 )
 logger = logging.getLogger("LiveBot")
-
-# Determine which index is running based on config passed
-index_str = "SENSEX" if (len(sys.argv) > 1 and "sensex" in sys.argv[1].lower()) else "NIFTY"
 
 # PORTFOLIO_FILE is set per-instance in LiveOrchestrator.__init__ now,
 # so legacy and regime engines can run side-by-side without overwriting
@@ -97,8 +101,11 @@ class LiveOrchestrator:
         # Publish bot state to disk so the dashboard backend (a separate
         # process) can render live indicators. File-based IPC keeps the
         # bot decoupled from the web layer.
+        # Suffix state files with _regime when running parallel mode, so
+        # legacy and regime bots don't overwrite each other's state.
+        state_index = index_str + "_regime" if self.engine_mode == "regime" else index_str
         self.state_publisher = StatePublisher(
-            Path(__file__).parent / "data", index_str,
+            Path(__file__).parent / "data", state_index,
         )
         self._last_signal: dict | None = None
         # Daily entry cap — block new entries after N completed trades today.

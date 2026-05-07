@@ -47,7 +47,22 @@ LOG_DIR = BASE_DIR / "logs"
 SESSION_FILE = BASE_DIR / "state" / "upstox_session.json"
 
 # --- Process Tracking ---
-tracked_pids = {"NIFTY": None, "SENSEX": None}
+# 4-bot view: legacy + regime mode for each index. The regime variants
+# point at *_regime files written by the bot when launched with the
+# regime config files.
+BOT_TYPES = ["NIFTY", "SENSEX", "NIFTY_REGIME", "SENSEX_REGIME"]
+tracked_pids = {b: None for b in BOT_TYPES}
+
+
+def _suffix(bot_type: str) -> str:
+    """Return the on-disk file suffix for this bot type.
+    NIFTY/SENSEX → 'NIFTY'/'SENSEX'  (legacy files, no extra suffix).
+    NIFTY_REGIME → 'NIFTY_regime'.
+    """
+    bt = bot_type.upper()
+    if bt == "NIFTY_REGIME":  return "NIFTY_regime"
+    if bt == "SENSEX_REGIME": return "SENSEX_regime"
+    return bt
 
 # --- Live indices cache (1s TTL) ---
 indices_cache = IndicesCache(session_file=SESSION_FILE)
@@ -57,24 +72,15 @@ indices_cache = IndicesCache(session_file=SESSION_FILE)
 
 def _engine_state_file(bot_type: str) -> Path:
     """Resolve the on-disk engine_state file written by main.py for `bot_type`."""
-    bot = bot_type.upper()
-    if bot == "SENSEX":
-        return BASE_DIR / "data" / "engine_state_SENSEX.json"
-    return BASE_DIR / "data" / "engine_state_NIFTY.json"
+    return BASE_DIR / "data" / f"engine_state_{_suffix(bot_type)}.json"
 
 
 def _missed_today_file(bot_type: str) -> Path:
-    bot = bot_type.upper()
-    if bot == "SENSEX":
-        return BASE_DIR / "data" / "missed_today_SENSEX.json"
-    return BASE_DIR / "data" / "missed_today_NIFTY.json"
+    return BASE_DIR / "data" / f"missed_today_{_suffix(bot_type)}.json"
 
 
 def _portfolio_file(bot_type: str) -> tuple[Path, float]:
-    bot = bot_type.upper()
-    if bot == "SENSEX":
-        return BASE_DIR / "data" / "paper_portfolio_SENSEX.json", 100000.0
-    return BASE_DIR / "data" / "paper_portfolio_NIFTY.json", 100000.0
+    return BASE_DIR / "data" / f"paper_portfolio_{_suffix(bot_type)}.json", 100000.0
 
 
 def _safe_load_json(path: Path, default):
@@ -88,17 +94,25 @@ def _safe_load_json(path: Path, default):
 
 
 def find_running_bots():
-    """Scan system for running main.py processes."""
-    found = {"NIFTY": None, "SENSEX": None}
+    """Scan system for running main.py processes. Returns map of
+    bot_type -> pid. Distinguishes NIFTY_REGIME / SENSEX_REGIME from the
+    plain legacy ones via the config-file argument on the cmdline.
+    """
+    found = {b: None for b in BOT_TYPES}
     for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
         try:
             cmdline = proc.info.get('cmdline') or []
             cmd_str = " ".join(cmdline).lower()
-            if 'main.py' in cmd_str and 'python' in cmd_str and 'scalper_main.py' not in cmd_str:
-                if 'config_sensex' in cmd_str:
-                    found["SENSEX"] = proc.pid
-                else:
-                    found["NIFTY"] = proc.pid
+            if 'main.py' not in cmd_str or 'python' not in cmd_str:
+                continue
+            if 'scalper_main.py' in cmd_str:
+                continue
+            is_sensex = 'config_sensex' in cmd_str
+            is_regime = '_regime' in cmd_str
+            if is_sensex and is_regime: found["SENSEX_REGIME"] = proc.pid
+            elif is_sensex:             found["SENSEX"] = proc.pid
+            elif is_regime:             found["NIFTY_REGIME"] = proc.pid
+            else:                       found["NIFTY"] = proc.pid
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             pass
     return found
@@ -109,7 +123,7 @@ def find_running_bots():
 def get_status():
     discovered = find_running_bots()
     result = []
-    for name in ["NIFTY", "SENSEX"]:
+    for name in BOT_TYPES:
         pid = discovered.get(name) or tracked_pids.get(name)
         # Verify pid is still alive
         if pid:
@@ -130,7 +144,7 @@ def get_status():
 @app.post("/start/{bot_type}")
 def start_bot(bot_type: str):
     bot_type = bot_type.upper()
-    if bot_type not in ["NIFTY", "SENSEX"]:
+    if bot_type not in BOT_TYPES:
         raise HTTPException(400, "Invalid bot type")
 
     # Check if already running
@@ -139,10 +153,13 @@ def start_bot(bot_type: str):
         tracked_pids[bot_type] = discovered[bot_type]
         return {"message": f"{bot_type} already running", "pid": discovered[bot_type]}
 
-    if bot_type == "SENSEX":
-        cmd = [sys.executable, str(BASE_DIR / "main.py"), "config_sensex.json"]
-    else:
-        cmd = [sys.executable, str(BASE_DIR / "main.py")]
+    config_map = {
+        "NIFTY":         "project_config.json",
+        "NIFTY_REGIME":  "project_config_regime.json",
+        "SENSEX":        "config_sensex.json",
+        "SENSEX_REGIME": "config_sensex_regime.json",
+    }
+    cmd = [sys.executable, str(BASE_DIR / "main.py"), config_map[bot_type]]
 
     try:
         proc = subprocess.Popen(
@@ -181,13 +198,7 @@ def stop_bot(bot_type: str):
 @app.get("/stats/{bot_type}")
 def get_stats(bot_type: str):
     bot_type = bot_type.upper()
-    if bot_type == "SENSEX":
-        f = BASE_DIR / "data" / "paper_portfolio_SENSEX.json"
-        cap = 100000
-    else:
-        f = BASE_DIR / "data" / "paper_portfolio_NIFTY.json"
-        cap = 100000
-
+    f, cap = _portfolio_file(bot_type)
     if not f.exists():
         return {"capital": cap, "open_position": None, "trade_history": []}
     with open(f, "r") as reader:
@@ -213,10 +224,16 @@ def update_config(config: dict):
 # --- Logs ---
 @app.get("/logs/{bot_type}")
 def get_logs(bot_type: str, lines: int = 100):
-    prefix = "sniper_bot_"
+    # Each bot variant writes to logs/sniper_bot_{INDEX}[_regime]_DATE.log.
+    # Match the latest file for the requested variant.
+    prefix = f"sniper_bot_{_suffix(bot_type)}_"
     log_files = sorted(LOG_DIR.glob(f"{prefix}*.log"), reverse=True)
+    # Backward compat: pre-split logs lived at sniper_bot_DATE.log (no
+    # index suffix). Fall back to those for legacy NIFTY/SENSEX only.
+    if not log_files and bot_type.upper() in ("NIFTY", "SENSEX"):
+        log_files = sorted(LOG_DIR.glob("sniper_bot_*.log"), reverse=True)
     if not log_files:
-        return {"logs": "No log files found. Start the bot to generate logs."}
+        return {"logs": f"No log files found for {bot_type}. Start the bot to generate logs."}
     try:
         with open(log_files[0], "r", encoding="utf-8") as f:
             content = f.readlines()

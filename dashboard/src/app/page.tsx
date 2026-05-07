@@ -20,7 +20,7 @@ import type {
   PortfolioStats, BotStatus, BotName,
 } from "@/types";
 
-const BOT_LIST: BotName[] = ["NIFTY", "SENSEX"];
+const BOT_LIST: BotName[] = ["NIFTY", "SENSEX", "NIFTY_REGIME", "SENSEX_REGIME"];
 type Tab = "live" | "control" | "logs" | "trades";
 
 export default function Dashboard() {
@@ -209,7 +209,7 @@ export default function Dashboard() {
             >
               {BOT_LIST.map((b) => (
                 <option key={b} value={b}>
-                  {b}
+                  {b.replace("_REGIME", " REGIME")}
                 </option>
               ))}
             </select>
@@ -257,7 +257,7 @@ export default function Dashboard() {
       <section className="px-4 md:px-8 pt-3 md:pt-4">
         <div className="max-w-6xl mx-auto grid grid-cols-3 gap-2 md:gap-4">
           <StatCard
-            label={`Capital (${activeBot})`}
+            label={`Capital (${activeBot.replace("_REGIME", " REGIME")})`}
             value={`₹${(stats?.capital ?? 0).toLocaleString("en-IN", {
               maximumFractionDigits: 0,
             })}`}
@@ -377,7 +377,7 @@ export default function Dashboard() {
               <div className="flex items-center gap-2 p-3 border-b border-white/5 bg-black/20">
                 <Terminal className="w-4 h-4 text-emerald-400" />
                 <span className="text-xs font-bold text-slate-400">
-                  Live Logs · {activeBot}
+                  Live Logs · {activeBot.replace("_REGIME", " REGIME")}
                 </span>
               </div>
               <div className="flex-1 p-3 font-mono text-[11px] leading-relaxed overflow-y-auto bg-black/30">
