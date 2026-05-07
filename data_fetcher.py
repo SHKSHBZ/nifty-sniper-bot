@@ -254,7 +254,9 @@ class DataFetcher:
             if not strikes: return
             
             atm = min(strikes, key=lambda x: abs(x - spot))
-            focus_zone = [atm + (i * self.strike_step) for i in range(-3, 4)]
+            # Store ATM ± 7 (15 strikes total) so we can audit trades on
+            # ITM/OTM legs that drift far from the wall during big moves.
+            focus_zone = [atm + (i * self.strike_step) for i in range(-7, 8)]
             
             now_ist = datetime.now(IST)
             today = now_ist.strftime("%Y-%m-%d")

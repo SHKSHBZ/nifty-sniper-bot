@@ -91,8 +91,15 @@ class LiveOrchestrator:
             Path(__file__).parent / "data", index_str,
         )
         self._last_signal: dict | None = None
+        # Daily entry cap — block new entries after N completed trades today.
+        with open(self.config.get("options_spec_path", "Options.json")) as fh:
+            opts = json.load(fh).get("configurableParameters", {})
+        self.max_positions_per_day = int(opts.get("maxPositionsPerDay", 6))
+        self._positions_today_date = None  # date string the counter belongs to
+        self._positions_today_count = 0
         logger.info(f"[OK] Engine mode: {self.engine_mode}, "
-                    f"Journal: {'ON' if self.journal_enabled else 'OFF'}")
+                    f"Journal: {'ON' if self.journal_enabled else 'OFF'}, "
+                    f"MaxPositionsPerDay: {self.max_positions_per_day}")
 
         # We need Nifty Spot 5m and 15m context for the engine
         # However, for the Pure Options Buyer without charts, we just pass None for dataframes.
@@ -274,6 +281,14 @@ class LiveOrchestrator:
         # `now` is already an IST tz-aware datetime supplied by run()
         if now.time() < ENTRY_WINDOW_OPEN: return
 
+        # Daily entry cap. Counter resets at the first scan of each new day.
+        today_str = now.date().isoformat()
+        if self._positions_today_date != today_str:
+            self._positions_today_date = today_str
+            self._positions_today_count = 0
+        if self._positions_today_count >= self.max_positions_per_day:
+            return  # cap reached — silent skip
+
         spot = self.fetcher.get_spot()
         sup = self.fetcher.get_support()
         res = self.fetcher.get_resistance()
@@ -335,7 +350,7 @@ class LiveOrchestrator:
             # Paper Fill — defer to tactic-prescribed sl/tp if dispatcher
             # supplied them, otherwise use legacy defaults.
             is_expiry = signal['is_expiry_day']
-            sl_pct = signal.get('tactic_sl_pct') or (0.20 if is_expiry else 0.30)
+            sl_pct = signal.get('tactic_sl_pct') or (0.20 if is_expiry else 0.20)
             tgt_pct = signal.get('tactic_tp_pct') or (0.35 if is_expiry else 0.50)
             time_stop_min = signal.get('tactic_time_stop_min',
                                         45 if is_expiry else 120)
@@ -345,6 +360,9 @@ class LiveOrchestrator:
 
             qty = self.lot_size # Dynamic Lot Size from Config
             tactic_name = signal.get('tactic_name', 'oi_wall_mean_reversion')
+
+            # Increment daily entry counter — checked at top of next scan.
+            self._positions_today_count += 1
 
             self.portfolio["open_position"] = {
                 "entry_time": now.isoformat(),
