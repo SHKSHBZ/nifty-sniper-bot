@@ -72,7 +72,7 @@ Unregister-ScheduledTask -TaskName "SniperBot_Dashboard" -Confirm:$false -ErrorA
 
 Register-ScheduledTask `
     -TaskName "SniperBot_Dashboard" `
-    -Description "Auto-starts the Sniper Bot dashboard at 07:00 UAE (08:30 IST). User clicks Play per bot from phone." `
+    -Description "Auto-starts the Sniper Bot dashboard at 07:00 UAE (08:30 IST). User taps Play per bot from phone." `
     -Action $dashAction `
     -Trigger $dashTrigger `
     -Settings $settings `
@@ -98,7 +98,7 @@ Unregister-ScheduledTask -TaskName "SniperBot_EODSummary" -Confirm:$false -Error
 
 Register-ScheduledTask `
     -TaskName "SniperBot_EODSummary" `
-    -Description "Sends Telegram EOD summary at 14:05 UAE (15:35 IST) — P&L for all 4 bots." `
+    -Description "Sends Telegram EOD summary at 14:05 UAE (15:35 IST) - PnL for all 4 bots." `
     -Action $eodAction `
     -Trigger $eodTrigger `
     -Settings $settings `
