@@ -1,0 +1,295 @@
+{
+  "version": "1.0",
+  "name": "Unified Multi-Pillar Options Strategy",
+  "last_updated": "2026-05-06",
+  "description": "Combines the user's 4-Pillar checklist with backtest-validated findings (VIX-direction signal, DTE filter, S/R-bounce reversal, late-day lottery). Bot-executable: every threshold is numeric, no qualitative judgement required.",
+
+  "global_config": {
+    "indices": ["NIFTY", "SENSEX"],
+    "lot_sizes": { "NIFTY": 65, "SENSEX": 20 },
+    "strike_steps": { "NIFTY": 50, "SENSEX": 100 },
+    "capital_per_trade_inr": 20000,
+    "total_working_capital_inr": 80000,
+    "max_concurrent_positions": 2,
+    "max_trades_per_day": 4,
+    "max_daily_drawdown_inr": 25000,
+    "circuit_breaker": {
+      "consecutive_losses_to_pause": 3,
+      "pause_duration_minutes": 60
+    }
+  },
+
+  "time_gates": {
+    "no_entries_before": "09:30",
+    "no_entries_after": "14:30",
+    "late_lottery_window": ["14:30", "15:00"],
+    "force_close_all_at": "15:25",
+    "skip_first_n_min_after_open": 15
+  },
+
+  "pre_trade_gates": {
+    "vix_regime_required": ["Normal", "Elevated"],
+    "vix_regime_blocked": ["Low", "High"],
+    "dte_preferred": [2, 3, 4, 5, 6],
+    "dte_blocked": [0, 1],
+    "min_atm_premium_inr": { "NIFTY": 10, "SENSEX": 50 },
+    "max_atm_premium_inr": { "NIFTY": 200, "SENSEX": 800 },
+    "min_minutes_between_entries": 30
+  },
+
+  "pillars": [
+    {
+      "id": 1,
+      "name": "Candlestick Pattern",
+      "weight": 1.0,
+      "timeframe": "5min",
+      "purpose": "What is happening at the level",
+      "patterns_long": ["BULLISH_ENGULFING", "HAMMER", "PIERCING", "MORNING_STAR"],
+      "patterns_short": ["BEARISH_ENGULFING", "SHOOTING_STAR", "DARK_CLOUD", "EVENING_STAR"],
+      "implementation_status": "needs_pattern_detector",
+      "skip_for_now": true,
+      "fallback": "use 5-min candle direction (3 consecutive same-color closes) as proxy"
+    },
+    {
+      "id": 2,
+      "name": "Support / Resistance",
+      "weight": 1.0,
+      "timeframe": "daily",
+      "purpose": "WHERE the level matters",
+      "method_priority": ["camarilla_S3_R3", "classic_pivot_S1_R1", "prev_day_low_high", "or30_low_high"],
+      "near_level_tolerance_pct": 0.2,
+      "level_strength_min_touches": 3,
+      "lookback_days_for_strength": 20,
+      "implementation_status": "ready",
+      "data_source": "reports/sr_levels_<index>.csv"
+    },
+    {
+      "id": 3,
+      "name": "Volatility Context (replaces Volume for index options)",
+      "weight": 1.0,
+      "timeframe": "live",
+      "purpose": "Don't pay for vol that's already priced in",
+      "vix_level_band": { "min": 12, "max": 18 },
+      "iv_percentile_max": 70,
+      "iv_lookback_days": 30,
+      "premium_richness_check": "current ATM premium below 70th percentile of same-DTE same-regime days",
+      "implementation_status": "ready",
+      "notes": "VIX is concurrent indicator (not predictive). Use intraday VIX direction as separate signal."
+    },
+    {
+      "id": 4,
+      "name": "Fibonacci Retracement",
+      "weight": 1.0,
+      "timeframe": "daily_15min_5min",
+      "purpose": "Mathematical alignment of S/R",
+      "key_levels_pct": [23.6, 38.2, 50.0, 61.8],
+      "minimum_prior_move_pct": 5.0,
+      "lookback_days_min": 5,
+      "lookback_days_preferred": [9, 21],
+      "near_level_tolerance_pct": 0.3,
+      "exact_level_tolerance_pct": 0.1,
+      "invalidation_rule": "Spot slices through 61.8% without reaction -> original trend broken, stand aside",
+      "implementation_status": "needs_swing_detector",
+      "skip_for_now": true
+    },
+    {
+      "id": 5,
+      "name": "VIX Direction (intraday)",
+      "weight": 1.5,
+      "timeframe": "live",
+      "purpose": "Concurrent direction confirmation",
+      "decision_time": "10:30",
+      "vix_change_threshold_pct": 1.0,
+      "rule": "if vix_pct_chg >= +1.0% AND vix_level in [15,18) -> bearish (PE); if <= -1.0% -> bullish (CE)",
+      "implementation_status": "ready",
+      "backtest_evidence": "+25,277 over 11 trades, 54.5% win rate (vix_direction_signal_tuned)"
+    }
+  ],
+
+  "decision_logic": {
+    "scoring": "sum of weights for passed pillars (active pillars: 2, 3, 5; pending: 1, 4)",
+    "active_pillars": [2, 3, 5],
+    "max_score_active": 3.5,
+    "actions": [
+      {
+        "score_min": 3.5, "label": "STRONG",
+        "size_pct_of_capital": 100, "strike_selection": "ATM_PLUS_2_ITM_COMBO"
+      },
+      {
+        "score_min": 2.5, "label": "NORMAL",
+        "size_pct_of_capital": 50, "strike_selection": "ATM_ONLY"
+      },
+      {
+        "score_min": 0, "label": "SKIP",
+        "size_pct_of_capital": 0
+      }
+    ]
+  },
+
+  "strike_selection_table": {
+    "ATM_PLUS_2_ITM_COMBO": {
+      "description": "Today's winning pattern at S/R: split capital 50/50 ATM and ATM+2 ITM",
+      "ce_setup": ["ATM", "ATM_minus_2_strikes"],
+      "pe_setup": ["ATM", "ATM_plus_2_strikes"],
+      "use_when": "Spot at S/R level, high conviction reversal, Pillar 5 confirms"
+    },
+    "ATM_ONLY": {
+      "description": "Standard directional bet",
+      "ce_setup": ["ATM"],
+      "pe_setup": ["ATM"],
+      "use_when": "Trend continuation, mid-conviction"
+    },
+    "STRADDLE": {
+      "description": "Long both legs, no direction view",
+      "ce_setup": ["ATM"],
+      "pe_setup": ["ATM"],
+      "use_when": "Expiry-day specific (DTE=0), both legs cheap, time exit only"
+    }
+  },
+
+  "tactics": [
+    {
+      "id": "T1_VIX_DIRECTION",
+      "name": "VIX-Direction Tuned",
+      "priority": 1,
+      "trigger_time": "10:30",
+      "conditions": {
+        "vix_level_band": { "min": 15, "max": 18 },
+        "vix_intraday_pct_change_abs_min": 1.0,
+        "dte_in": [2, 3, 4, 5, 6]
+      },
+      "signal": {
+        "vix_rising": "BUY_PE_ATM",
+        "vix_falling": "BUY_CE_ATM"
+      },
+      "exits": {
+        "tp_pct": 30,
+        "sl_pct": 30,
+        "trail_to_breakeven_at_pct": 15,
+        "force_close_at": "15:25"
+      },
+      "expected_annual_pnl_inr": 16000,
+      "expected_max_dd_inr": 5000,
+      "backtest_ref": "vix_direction_signal_tuned"
+    },
+    {
+      "id": "T2_EXPIRY_STRADDLE",
+      "name": "Long Straddle S2",
+      "priority": 2,
+      "trigger_time": "14:50",
+      "conditions": {
+        "is_expiry_day": true,
+        "ce_premium_band": [5, 20],
+        "pe_premium_band": [5, 20]
+      },
+      "signal": "BUY_STRADDLE_ATM",
+      "sizing": "equal_lots_both_legs",
+      "exits": {
+        "sl_combined_pct": 50,
+        "tp_combined_pct": null,
+        "force_close_at": "15:25"
+      },
+      "expected_annual_pnl_inr": 30000,
+      "expected_max_dd_inr": 21000,
+      "backtest_ref": "expiry_straddle_S2"
+    },
+    {
+      "id": "T3_SR_BOUNCE_REVERSAL",
+      "name": "Support / Resistance Bounce with ITM",
+      "priority": 3,
+      "status": "PROPOSED_NOT_YET_BACKTESTED",
+      "description": "Today's user trade pattern. Not yet validated.",
+      "trigger_conditions": {
+        "spot_within_pct_of_sr_level": 0.2,
+        "sr_level_must_be_strong": true,
+        "candle_must_show_rejection": true,
+        "timeframe_for_rejection": "5min"
+      },
+      "signal": {
+        "support_bounce": "BUY_CE_ATM_AND_ATM_MINUS_2",
+        "resistance_rejection": "BUY_PE_ATM_AND_ATM_PLUS_2"
+      },
+      "sizing": "split_50_50_atm_and_itm",
+      "exits": {
+        "tp_pct": 50,
+        "sl_break_of_sr_level": true,
+        "trail_to_breakeven_at_pct": 20,
+        "force_close_at": "15:25"
+      },
+      "blockers": ["needs S/R level data with strength rating",
+                   "needs candle pattern detector or rejection rule",
+                   "needs backtest validation"]
+    },
+    {
+      "id": "T4_LATE_DAY_LOTTERY",
+      "name": "Late-Day Cheap OTM",
+      "priority": 4,
+      "status": "PROPOSED_NOT_YET_BACKTESTED",
+      "trigger_time_window": ["14:30", "15:00"],
+      "conditions": {
+        "is_expiry_day": true,
+        "premium_band_inr": [5, 15],
+        "strikes_to_scan": "ATM-100 to ATM+200"
+      },
+      "signal": "BUY_CHEAP_OTM_SMALL_SIZE",
+      "sizing": "1_lot_only",
+      "exits": {
+        "tp_pct": 50,
+        "sl_pct": null,
+        "force_close_at": "15:25"
+      }
+    }
+  ],
+
+  "risk_management": {
+    "per_trade_max_loss_inr": 6000,
+    "daily_max_loss_inr": 25000,
+    "weekly_max_loss_inr": 60000,
+    "monthly_max_loss_inr": 150000,
+    "after_loss_streak_pause": {
+      "consecutive_losses": 3,
+      "pause_for_minutes": 60
+    },
+    "minimum_risk_reward_ratio": 1.0,
+    "no_trade_within_min_after_loss": 15,
+    "session_kill_switch_at_drawdown_inr": 30000
+  },
+
+  "data_requirements": {
+    "spot_1min": ["NIFTY", "SENSEX"],
+    "vix_1min": "INDIA_VIX",
+    "option_chain_1min": "ATM +/- 10 strikes for current and next weekly expiry",
+    "live_polling_interval_sec": 60,
+    "sr_levels_recompute_at": ["pre_market_0900", "post_open_0945"]
+  },
+
+  "implementation_checklist": [
+    {
+      "task": "S/R levels compute (already done for NIFTY, pending SENSEX)",
+      "file": "backtesting/sr_levels_compute.py",
+      "status": "ready"
+    },
+    {
+      "task": "Wider option chain download (ATM +/-10)",
+      "file": "backtesting/{nifty,sensex}_historical_downloader.py",
+      "status": "ready"
+    },
+    {
+      "task": "Backtest T3 (S/R-Bounce-Reversal)",
+      "blockers": ["candle pattern detector"],
+      "status": "pending"
+    },
+    {
+      "task": "Bot integration: T1 + T2 as live tactics",
+      "file": "tactics/vix_direction.py + tactics/expiry_straddle.py (new)",
+      "status": "pending"
+    }
+  ],
+
+  "open_questions": [
+    "Should T3 fire even without candlestick confirmation if S/R touch is sharp enough?",
+    "Should T4 (late-day lottery) be position-size capped to Rs.5k (not Rs.20k)?",
+    "Trail-to-breakeven trigger: keep at +15% or different per tactic?",
+    "When two tactics fire same day, allocate to higher-priority or both with separate capital?"
+  ]
+}
