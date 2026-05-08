@@ -18,6 +18,7 @@ from journal import JournalRecorder, write_daily_report, analyze_trade
 from journal.models import ExecutedTrade
 from journal.missed_tracker import LiveMissedTracker
 from journal.state_publisher import StatePublisher
+from vigilance import classify_regime
 
 # Create logs directory
 Path("logs").mkdir(exist_ok=True)
@@ -114,9 +115,21 @@ class LiveOrchestrator:
         self.max_positions_per_day = int(opts.get("maxPositionsPerDay", 6))
         self._positions_today_date = None  # date string the counter belongs to
         self._positions_today_count = 0
+        # PR 2: drawdown breaker + consecutive-loss regime self-diagnostic.
+        # daily_drawdown_pct = -1.5% of session-start cap halts entries for the day.
+        self.daily_drawdown_pct = float(opts.get("dailyDrawdownPct", 1.5)) / 100.0
+        self.consecutive_loss_threshold = int(opts.get("consecutiveLossThreshold", 2))
+        self._session_start_capital: float | None = None  # set on first scan of day
+        self._consecutive_losses = 0
+        # _regime_lock: None | 'STOPPED' | 'CE_ONLY' | 'PE_ONLY' — set after
+        # consecutive-loss diagnostic; reset at the start of each new day.
+        self._regime_lock: str | None = None
+        self._regime_lock_reasons: list[str] = []
         logger.info(f"[OK] Engine mode: {self.engine_mode}, "
                     f"Journal: {'ON' if self.journal_enabled else 'OFF'}, "
-                    f"MaxPositionsPerDay: {self.max_positions_per_day}")
+                    f"MaxPositionsPerDay: {self.max_positions_per_day}, "
+                    f"DailyDrawdown: {self.daily_drawdown_pct*100:.1f}%, "
+                    f"ConsecLossThr: {self.consecutive_loss_threshold}")
 
         # We need Nifty Spot 5m and 15m context for the engine
         # However, for the Pure Options Buyer without charts, we just pass None for dataframes.
@@ -303,8 +316,32 @@ class LiveOrchestrator:
         if self._positions_today_date != today_str:
             self._positions_today_date = today_str
             self._positions_today_count = 0
+            # PR 2: also reset session-start cap, loss counter, regime lock
+            self._session_start_capital = self.portfolio["capital"]
+            self._consecutive_losses = 0
+            self._regime_lock = None
+            self._regime_lock_reasons = []
+            logger.info(f"[DAY-START] cap={self._session_start_capital:.0f}, "
+                        f"drawdown breaker armed at -{self.daily_drawdown_pct*100:.1f}%")
         if self._positions_today_count >= self.max_positions_per_day:
             return  # cap reached — silent skip
+
+        # PR 2: regime lock from consecutive-loss diagnostic
+        if self._regime_lock == "STOPPED":
+            return  # silent skip — already logged when lock was set
+
+        # PR 2: daily drawdown circuit breaker
+        if self._session_start_capital is not None:
+            loss = self._session_start_capital - self.portfolio["capital"]
+            if loss > self.daily_drawdown_pct * self._session_start_capital:
+                if self._regime_lock != "STOPPED":  # log once
+                    self._regime_lock = "STOPPED"
+                    msg = (f"[DRAWDOWN BREAKER] Loss Rs.{loss:,.0f} exceeds "
+                           f"{self.daily_drawdown_pct*100:.1f}% of "
+                           f"Rs.{self._session_start_capital:,.0f}. Halting entries.")
+                    logger.warning(msg)
+                    self.telegram.send_message(msg)
+                return
 
         spot = self.fetcher.get_spot()
         sup = self.fetcher.get_support()
@@ -339,6 +376,17 @@ class LiveOrchestrator:
 
         if signal['direction']:
             direction = signal['direction']
+
+            # PR 2: regime lock from consecutive-loss diagnostic.
+            # If classifier said TRENDING_UP after 2 losses, we only take CE
+            # for the rest of the day (and inverse for TRENDING_DOWN).
+            if self._regime_lock == "CE_ONLY" and direction == "PE":
+                logger.info(f"[REGIME LOCK] PE blocked — classifier locked CE_ONLY")
+                return
+            if self._regime_lock == "PE_ONLY" and direction == "CE":
+                logger.info(f"[REGIME LOCK] CE blocked — classifier locked PE_ONLY")
+                return
+
             # We enforce Delta > 0.40 rule here
             # Buy ITM or slightly ATM depending on the wall
             atm_strike = int(round(spot / self.strike_step) * self.strike_step)
@@ -479,6 +527,38 @@ class LiveOrchestrator:
 
         self.portfolio["open_position"] = None
         self.save_portfolio()
+
+        # PR 2: consecutive-loss tracking + regime self-diagnostic.
+        # Wins reset the counter; losses tick it up. Once we hit the
+        # threshold (default 2), classify the market and apply a lock
+        # for the rest of the day instead of blindly pausing.
+        if pnl < 0:
+            self._consecutive_losses += 1
+            if (self._consecutive_losses >= self.consecutive_loss_threshold
+                    and self._regime_lock is None):
+                try:
+                    spot_hist = self.fetcher.get_spot_history()
+                    pcr_oi_hist = self.engine._history
+                    reading = classify_regime(spot_hist, pcr_oi_hist)
+                    self._regime_lock_reasons = list(reading.reasons)
+                    if reading.is_chop:
+                        self._regime_lock = "STOPPED"
+                    elif reading.is_trending and reading.direction == "CE":
+                        self._regime_lock = "CE_ONLY"
+                    elif reading.is_trending and reading.direction == "PE":
+                        self._regime_lock = "PE_ONLY"
+                    else:
+                        # UNCLEAR — leave lock unset, will re-check on next loss
+                        self._consecutive_losses = 0  # give one more chance
+                    diag = (f"[REGIME DIAGNOSTIC] After {self.consecutive_loss_threshold} "
+                            f"losses: verdict={reading.verdict}, lock={self._regime_lock}\n"
+                            + "\n".join(f"  - {r}" for r in reading.reasons))
+                    logger.warning(diag)
+                    self.telegram.send_message(diag)
+                except Exception as e:
+                    logger.warning(f"Regime classifier failed: {e}")
+        else:
+            self._consecutive_losses = 0
 
         msg = (f"🏁 PAPER TRADE CLOSED\n"
                f"Reason: {reason}\n"

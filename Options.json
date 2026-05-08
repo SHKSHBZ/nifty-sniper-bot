@@ -90,6 +90,8 @@
     "paperTradeMode": true,
     "pcrSlopeLookbackMinutes": 30,
     "pcrSlopeMaxDrop": 0.05,
-    "oiDeltaRatioMax": 1.5
+    "oiDeltaRatioMax": 1.5,
+    "dailyDrawdownPct": 1.5,
+    "consecutiveLossThreshold": 2
   }
 }
