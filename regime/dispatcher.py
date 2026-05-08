@@ -98,7 +98,19 @@ class TacticDispatcher:
         # IEF is a "bonus" tactic that fires alongside the trend tactic when
         # the SMC pattern aligns. It's queried in addition to the routed
         # tactic on TREND_UP / TREND_DOWN regimes.
-        self.ief_tactic = IEFTactic()
+        # PR 5: read iefEnabled / iefMinHistoryBars from Options.json so
+        # operator can disable or relax IEF without touching code.
+        try:
+            import json as _json
+            from pathlib import Path as _P
+            opts = _json.loads((_P(__file__).resolve().parent.parent
+                                / "Options.json").read_text()).get("configurableParameters", {})
+        except Exception:
+            opts = {}
+        self.ief_enabled = bool(opts.get("iefEnabled", True))
+        ief_min_bars = int(opts.get("iefMinHistoryBars", 25))
+        from tactics.ief import IEFConfig as _IEFConfig
+        self.ief_tactic = IEFTactic(_IEFConfig(min_history_bars=ief_min_bars))
 
     # ----- lifecycle ----------------------------------------------------
 
@@ -224,8 +236,9 @@ class TacticDispatcher:
 
         # On TREND regimes, also give IEF a chance (it has a stricter setup
         # so will only fire on real SMC patterns; rare but high-quality).
-        if sig is None and regime in (Regime.TREND_UP, Regime.TREND_DOWN,
-                                       Regime.TREND_UP_GAP, Regime.TREND_DOWN_GAP):
+        if (self.ief_enabled and sig is None
+                and regime in (Regime.TREND_UP, Regime.TREND_DOWN,
+                               Regime.TREND_UP_GAP, Regime.TREND_DOWN_GAP)):
             ief_sig = self.ief_tactic.evaluate(state)
             if ief_sig is not None:
                 legacy = _legacy_signal_from_tactic(ief_sig, regime, dte, is_expiry)
@@ -311,7 +324,8 @@ class TacticDispatcher:
         candidates: list[tuple[str, TacticBase]] = [
             (t_enum.value, t_obj) for t_enum, t_obj in self.tactics.items()
         ]
-        candidates.append(("ief", self.ief_tactic))
+        if self.ief_enabled:
+            candidates.append(("ief", self.ief_tactic))
 
         for tactic_name, tactic_obj in candidates:
             try:
