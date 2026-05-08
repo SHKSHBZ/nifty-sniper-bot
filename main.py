@@ -119,6 +119,12 @@ class LiveOrchestrator:
         # daily_drawdown_pct = -1.5% of session-start cap halts entries for the day.
         self.daily_drawdown_pct = float(opts.get("dailyDrawdownPct", 1.5)) / 100.0
         self.consecutive_loss_threshold = int(opts.get("consecutiveLossThreshold", 2))
+        # PR 3 active-management thresholds (read from Options.json so we
+        # can tune without code changes).
+        self.pcr_shift_exit_threshold = float(opts.get("pcrShiftExitThreshold", 0.10))
+        self.adverse_oi_growth_exit_pct = float(opts.get("adverseOiGrowthExitPct", 8.0)) / 100.0
+        self.time_stop_minutes = int(opts.get("timeStopMinutes", 30))
+        self.time_stop_min_profit_pct = float(opts.get("timeStopMinProfitPct", 0.5)) / 100.0
         self._session_start_capital: float | None = None  # set on first scan of day
         self._consecutive_losses = 0
         # _regime_lock: None | 'STOPPED' | 'CE_ONLY' | 'PE_ONLY' — set after
@@ -300,6 +306,13 @@ class LiveOrchestrator:
             exit_reason = "TRAILING STOP" if pos.get('tsl_active') else "HARD STOP LOSS"
         elif time_held_mins >= max_hold:
             exit_reason = "THETA SHIELD (Time Stop Exceeded)"
+        else:
+            # PR 3: active-management exits. These run only if the position
+            # has not already hit target/SL/theta-shield. Each check is
+            # bounded — pulls from cached fetcher state (no extra API calls).
+            active_reason = self._check_active_exits(now, pos, live_premium, time_held_mins)
+            if active_reason:
+                exit_reason = active_reason
 
         if exit_reason:
             self._close_position(exit_reason, exit_price=live_premium)
@@ -429,6 +442,10 @@ class LiveOrchestrator:
             # Increment daily entry counter — checked at top of next scan.
             self._positions_today_count += 1
 
+            # PR 3: snapshot entry-time PCR + focus-zone OI so the
+            # active-management exits (PCR shift, adverse OI, time-stop)
+            # have a baseline to compare against.
+            entry_oi = self.fetcher.get_oi_pattern() or {}
             self.portfolio["open_position"] = {
                 "entry_time": now.isoformat(),
                 "trade_type": f"BUY {direction}",
@@ -444,6 +461,9 @@ class LiveOrchestrator:
                 "sl_pct": sl_pct,
                 "tp_pct": tgt_pct,
                 "time_stop_min": time_stop_min,
+                "entry_pcr": float(focus_pcr),
+                "entry_total_ce_oi": float(entry_oi.get("total_ce_oi", 0) or 0),
+                "entry_total_pe_oi": float(entry_oi.get("total_pe_oi", 0) or 0),
             }
             self.save_portfolio()
 
@@ -485,6 +505,66 @@ class LiveOrchestrator:
             reason_summary = signal['reasons'][0] if signal['reasons'] else "No signal"
             logger.info(f"Scanning... FocusPCR: {focus_pcr:.2f} | S:{sup} R:{res} | Spot: {spot:.0f} | {reason_summary}")
 
+
+    def _check_active_exits(self, now, pos, live_premium, time_held_mins):
+        """PR 3: position-management exits beyond static SL/TP/theta-shield.
+
+        Three independent triggers, ordered by signal strength:
+          1. PCR shift exit — entry-time PCR moved >0.10 against the trade
+             (CE: PCR collapsed; PE: PCR rallied). Means the directional
+             flow that justified the entry has reversed.
+          2. Adverse OI exit — focus-zone OI built up against position
+             >8% (CE: call writers stacking; PE: put writers stacking).
+          3. Time-stop scaling — at <0.5% profit after 30 minutes, exit.
+             Theta is now eating us; no edge realised.
+
+        Returns: exit_reason string, or None if no trigger fires.
+        """
+        direction = pos.get('opt_type')
+        thr = self.pcr_shift_exit_threshold
+        # Trigger 1: PCR shift
+        try:
+            entry_pcr = float(pos.get('entry_pcr', 0) or 0)
+            cur_pcr = float(self.fetcher.get_focus_pcr() or 0)
+            if entry_pcr > 0 and cur_pcr > 0:
+                shift = cur_pcr - entry_pcr
+                if direction == 'CE' and shift <= -thr:
+                    return f"PCR SHIFT EXIT (CE: {entry_pcr:.2f} -> {cur_pcr:.2f}, delta {shift:+.2f})"
+                if direction == 'PE' and shift >= thr:
+                    return f"PCR SHIFT EXIT (PE: {entry_pcr:.2f} -> {cur_pcr:.2f}, delta {shift:+.2f})"
+        except Exception:
+            pass
+
+        # Trigger 2: adverse OI build during hold
+        try:
+            entry_ce = float(pos.get('entry_total_ce_oi', 0) or 0)
+            entry_pe = float(pos.get('entry_total_pe_oi', 0) or 0)
+            cur_oi = self.fetcher.get_oi_pattern() or {}
+            cur_ce = float(cur_oi.get('total_ce_oi', 0) or 0)
+            cur_pe = float(cur_oi.get('total_pe_oi', 0) or 0)
+            if direction == 'CE' and entry_ce > 0 and cur_ce > 0:
+                growth = (cur_ce - entry_ce) / entry_ce
+                if growth >= self.adverse_oi_growth_exit_pct:
+                    return f"ADVERSE OI EXIT (CE OI grew {growth*100:+.1f}% - call writers stacking)"
+            if direction == 'PE' and entry_pe > 0 and cur_pe > 0:
+                growth = (cur_pe - entry_pe) / entry_pe
+                if growth >= self.adverse_oi_growth_exit_pct:
+                    return f"ADVERSE OI EXIT (PE OI grew {growth*100:+.1f}% - put writers stacking)"
+        except Exception:
+            pass
+
+        # Trigger 3: time-stop scaling - break-even-ish after time_stop_minutes
+        try:
+            entry_price = float(pos.get('entry_price', 0) or 0)
+            if entry_price > 0 and time_held_mins >= self.time_stop_minutes:
+                gain_pct = (live_premium - entry_price) / entry_price
+                if gain_pct < self.time_stop_min_profit_pct:
+                    return (f"TIME STOP ({self.time_stop_minutes}m at "
+                            f"{gain_pct*100:+.2f}% - no edge realised)")
+        except Exception:
+            pass
+
+        return None
 
     def _close_position(self, reason, exit_price=None):
         pos = self.portfolio["open_position"]

@@ -92,6 +92,10 @@
     "pcrSlopeMaxDrop": 0.05,
     "oiDeltaRatioMax": 1.5,
     "dailyDrawdownPct": 1.5,
-    "consecutiveLossThreshold": 2
+    "consecutiveLossThreshold": 2,
+    "pcrShiftExitThreshold": 0.10,
+    "adverseOiGrowthExitPct": 8.0,
+    "timeStopMinutes": 30,
+    "timeStopMinProfitPct": 0.5
   }
 }
