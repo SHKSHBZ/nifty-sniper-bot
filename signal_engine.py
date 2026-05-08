@@ -64,6 +64,17 @@ PCR_SLOPE_LOOKBACK_MINUTES = PARAMS.get("pcrSlopeLookbackMinutes", 30)
 PCR_SLOPE_MAX_DROP         = PARAMS.get("pcrSlopeMaxDrop", 0.05)
 OI_DELTA_RATIO_MAX         = PARAMS.get("oiDeltaRatioMax", 1.5)
 
+# PR 4: pre-Gate-1 context filters.
+# VWAP filter — gate CE entries below VWAP, PE entries above VWAP.
+# Cheap structural sanity: never long below the average price, never
+# short above it.
+VWAP_FILTER_ENABLED  = bool(PARAMS.get("vwapFilterEnabled", True))
+# Range/chop detector — if 60-min spot range is < this fraction of
+# spot, skip directional entries (no edge in tight chop).
+CHOP_DETECTOR_ENABLED  = bool(PARAMS.get("chopDetectorEnabled", True))
+CHOP_RANGE_LOOKBACK_MIN = int(PARAMS.get("chopRangeLookbackMinutes", 60))
+CHOP_RANGE_MAX_PCT      = float(PARAMS.get("chopRangeMaxPct", 0.005))  # 0.5%
+
 # ---------------------------------------------------------------------------
 # Gate 1: Spot Sustain Check
 # ---------------------------------------------------------------------------
@@ -227,6 +238,33 @@ class SignalEngine:
         # ~2 hours at 60s polling — plenty for a 30-min lookback.
         self._history = deque(maxlen=180)
 
+    @staticmethod
+    def _compute_session_vwap(spot_history):
+        """Cheap VWAP approximation. Bot has no per-tick volume data, so we
+        use simple average of spot ticks — a reasonable proxy of session
+        average price for filter-quality decisions."""
+        if not spot_history:
+            return None
+        spots = [float(s.get('spot', 0) or 0) for s in spot_history if isinstance(s, dict)]
+        spots = [s for s in spots if s > 0]
+        if len(spots) < 5:
+            return None
+        return sum(spots) / len(spots)
+
+    @staticmethod
+    def _compute_range_pct(spot_history, lookback_minutes):
+        """Return (high - low) / spot_now over last `lookback_minutes` ticks.
+        Returns None if history is too short for a meaningful read."""
+        if not spot_history:
+            return None
+        spots = [float(s.get('spot', 0) or 0) for s in spot_history if isinstance(s, dict)]
+        spots = [s for s in spots if s > 0]
+        n = min(lookback_minutes, len(spots))
+        if n < 30:  # need at least 30 samples to call it a range
+            return None
+        window = spots[-n:]
+        return (max(window) - min(window)) / window[-1]
+
     def _push_history(self, now, focus_pcr, oi_pattern):
         ce_oi = oi_pattern.get('total_ce_oi', 0) if isinstance(oi_pattern, dict) else 0
         pe_oi = oi_pattern.get('total_pe_oi', 0) if isinstance(oi_pattern, dict) else 0
@@ -317,6 +355,28 @@ class SignalEngine:
             now = datetime.now()
         self._push_history(now, focus_pcr, oi_pattern)
 
+        # PR 4: pre-Gate-1 context filters. Run FIRST so we don't waste
+        # cycles evaluating proximity / sustain in obvious no-trade conditions.
+
+        # Range/chop detector — if 60-min spot range is too tight, skip.
+        if CHOP_DETECTOR_ENABLED:
+            range_pct = self._compute_range_pct(spot_history, CHOP_RANGE_LOOKBACK_MIN)
+            if range_pct is not None and range_pct < CHOP_RANGE_MAX_PCT:
+                reasons.append(
+                    f"❌ CHOP FILTER: 60m range {range_pct*100:.2f}% < "
+                    f"{CHOP_RANGE_MAX_PCT*100:.2f}% — no directional edge."
+                )
+                return {
+                    "direction": None, "reasons": reasons,
+                    "dte_risk": "MODERATE", "dte_days": 99,
+                    "is_expiry_day": False, "score": 0,
+                }
+
+        # VWAP filter — block CE below VWAP, PE above VWAP. We compute the
+        # candidate direction from proximity below; for now stash the VWAP
+        # value so the Gate 2 branches can check it.
+        vwap = self._compute_session_vwap(spot_history) if VWAP_FILTER_ENABLED else None
+
         # Calculate distances to walls
         dist_to_sup = abs(spot_close - support) / spot_close if support > 0 else 999
         dist_to_res = abs(resistance - spot_close) / spot_close if resistance > 0 else 999
@@ -351,8 +411,16 @@ class SignalEngine:
                         f"❌ GATE 0 FAIL: India VIX is {india_vix:.2f} (Fear/Downtrend). "
                         f"Taking CE (Call) entries against the macro trend is blocked."
                     )
+                # PR 4: VWAP filter — no CE entries below session VWAP.
+                elif vwap is not None and spot_close < vwap:
+                    reasons.append(
+                        f"❌ VWAP FILTER: Spot {spot_close:.0f} below VWAP {vwap:.0f} — "
+                        f"no CE entry against trend."
+                    )
                 else:
                     reasons.append(f"✅ GATE 0 PASS: VIX={india_vix:.2f} supports CE entries.")
+                    if vwap is not None:
+                        reasons.append(f"✅ VWAP OK: spot {spot_close:.0f} ≥ VWAP {vwap:.0f}")
 
                     # --- GATE 2: PCR must lie inside the CE entry band ---
                     if FOCUS_PCR_CE_ENTRY_LOW <= focus_pcr <= FOCUS_PCR_CE_ENTRY_HIGH:
@@ -415,8 +483,16 @@ class SignalEngine:
                         f"❌ GATE 0 FAIL: India VIX is {india_vix:.2f} (Growth/Uptrend). "
                         f"Taking PE (Put) entries against the macro trend is blocked."
                     )
+                # PR 4: VWAP filter — no PE entries above session VWAP.
+                elif vwap is not None and spot_close > vwap:
+                    reasons.append(
+                        f"❌ VWAP FILTER: Spot {spot_close:.0f} above VWAP {vwap:.0f} — "
+                        f"no PE entry against trend."
+                    )
                 else:
                     reasons.append(f"✅ GATE 0 PASS: VIX={india_vix:.2f} supports PE entries.")
+                    if vwap is not None:
+                        reasons.append(f"✅ VWAP OK: spot {spot_close:.0f} ≤ VWAP {vwap:.0f}")
 
                     # --- GATE 2: PCR must lie inside the PE entry band ---
                     if FOCUS_PCR_PE_ENTRY_LOW <= focus_pcr <= FOCUS_PCR_PE_ENTRY_HIGH:

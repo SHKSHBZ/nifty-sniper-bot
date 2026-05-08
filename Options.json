@@ -96,6 +96,10 @@
     "pcrShiftExitThreshold": 0.10,
     "adverseOiGrowthExitPct": 8.0,
     "timeStopMinutes": 30,
-    "timeStopMinProfitPct": 0.5
+    "timeStopMinProfitPct": 0.5,
+    "vwapFilterEnabled": true,
+    "chopDetectorEnabled": true,
+    "chopRangeLookbackMinutes": 60,
+    "chopRangeMaxPct": 0.005
   }
 }
