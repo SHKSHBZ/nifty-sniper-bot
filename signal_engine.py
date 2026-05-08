@@ -10,6 +10,7 @@ Three-gate entry system:
 """
 
 import json
+from collections import deque
 from datetime import datetime, date, timedelta
 from pathlib import Path
 
@@ -54,6 +55,14 @@ FOCUS_PCR_CE_ENTRY_HIGH = 1.30   # above this = too extended; fade-risk
 
 FOCUS_PCR_PE_ENTRY_LOW  = 0.50   # below this = extreme; fade-risk
 FOCUS_PCR_PE_ENTRY_HIGH = 0.95   # need at least this much bearish lean for PE
+
+# Gate 2 vigilance sub-gates — added 2026-05-09 after analysing 2026-05-08
+# loss day. Bot took CE at PCR=1.05 while PCR was collapsing (1.15→0.85)
+# and CE-OI was building (call writers stacking resistance). Snapshot gates
+# missed both. These two checks add TREND awareness on top of the band.
+PCR_SLOPE_LOOKBACK_MINUTES = PARAMS.get("pcrSlopeLookbackMinutes", 30)
+PCR_SLOPE_MAX_DROP         = PARAMS.get("pcrSlopeMaxDrop", 0.05)
+OI_DELTA_RATIO_MAX         = PARAMS.get("oiDeltaRatioMax", 1.5)
 
 # ---------------------------------------------------------------------------
 # Gate 1: Spot Sustain Check
@@ -212,8 +221,82 @@ def calculate_position_size(capital, entry_premium, sl_premium, lot_size=65, is_
 # The Sniper Signal Engine v3.0
 # ---------------------------------------------------------------------------
 class SignalEngine:
+    def __init__(self):
+        # Rolling history of (timestamp, focus_pcr, total_ce_oi, total_pe_oi)
+        # used by the slope / OI-delta sub-gates inside Gate 2. Sized for
+        # ~2 hours at 60s polling — plenty for a 30-min lookback.
+        self._history = deque(maxlen=180)
+
+    def _push_history(self, now, focus_pcr, oi_pattern):
+        ce_oi = oi_pattern.get('total_ce_oi', 0) if isinstance(oi_pattern, dict) else 0
+        pe_oi = oi_pattern.get('total_pe_oi', 0) if isinstance(oi_pattern, dict) else 0
+        self._history.append((now, float(focus_pcr or 0), float(ce_oi or 0), float(pe_oi or 0)))
+
+    def _lookback_sample(self, now, minutes):
+        """Return the oldest sample at least `minutes` ago, or None if not enough history."""
+        cutoff = now - timedelta(minutes=minutes)
+        for sample in self._history:
+            if sample[0] <= cutoff:
+                return sample
+        return None
+
+    def _check_pcr_slope(self, now, focus_pcr, direction):
+        """For CE: PCR must not have dropped > MAX_DROP over lookback window.
+        For PE: PCR must not have RISEN > MAX_DROP over the same window.
+        Returns (passed: bool, reason: str). Default-pass during warmup."""
+        ref = self._lookback_sample(now, PCR_SLOPE_LOOKBACK_MINUTES)
+        if ref is None:
+            return True, f"PCR slope: warmup (<{PCR_SLOPE_LOOKBACK_MINUTES}m history)"
+        ref_pcr = ref[1]
+        delta = focus_pcr - ref_pcr
+        if direction == "CE":
+            if delta < -PCR_SLOPE_MAX_DROP:
+                return False, (f"PCR collapsing: {ref_pcr:.2f} → {focus_pcr:.2f} "
+                               f"(Δ {delta:+.2f}) over {PCR_SLOPE_LOOKBACK_MINUTES}m. "
+                               f"Bears stepping in — block CE.")
+            return True, f"PCR slope OK: {ref_pcr:.2f} → {focus_pcr:.2f} (Δ {delta:+.2f})"
+        else:  # PE
+            if delta > PCR_SLOPE_MAX_DROP:
+                return False, (f"PCR rallying: {ref_pcr:.2f} → {focus_pcr:.2f} "
+                               f"(Δ {delta:+.2f}) over {PCR_SLOPE_LOOKBACK_MINUTES}m. "
+                               f"Bulls stepping in — block PE.")
+            return True, f"PCR slope OK: {ref_pcr:.2f} → {focus_pcr:.2f} (Δ {delta:+.2f})"
+
+    def _check_oi_delta_ratio(self, now, oi_pattern, direction):
+        """For CE: ΔCE_OI must NOT be more than RATIO × ΔPE_OI (call writing dominant = bearish).
+        For PE: inverse. Default-pass during warmup or when both deltas are tiny."""
+        ref = self._lookback_sample(now, PCR_SLOPE_LOOKBACK_MINUTES)
+        if ref is None:
+            return True, f"OI delta: warmup (<{PCR_SLOPE_LOOKBACK_MINUTES}m history)"
+        _, _, ref_ce_oi, ref_pe_oi = ref
+        cur_ce_oi = oi_pattern.get('total_ce_oi', 0) if isinstance(oi_pattern, dict) else 0
+        cur_pe_oi = oi_pattern.get('total_pe_oi', 0) if isinstance(oi_pattern, dict) else 0
+        d_ce = cur_ce_oi - ref_ce_oi
+        d_pe = cur_pe_oi - ref_pe_oi
+        # If neither side is meaningfully changing, no signal — pass.
+        if max(abs(d_ce), abs(d_pe)) < 1000:
+            return True, f"OI delta: flat (Δce={d_ce:+,.0f}, Δpe={d_pe:+,.0f})"
+        if direction == "CE":
+            # Bears writing calls faster than puts? Block.
+            if d_ce > 0 and d_pe <= 0:
+                return False, (f"Call writers stacking, put writers absent: "
+                               f"Δce={d_ce:+,.0f}, Δpe={d_pe:+,.0f} — block CE.")
+            if d_pe > 0 and d_ce > OI_DELTA_RATIO_MAX * d_pe:
+                return False, (f"Call OI build outpacing put OI build "
+                               f"({d_ce:+,.0f} > {OI_DELTA_RATIO_MAX}×{d_pe:+,.0f}) — block CE.")
+            return True, f"OI delta OK: Δce={d_ce:+,.0f}, Δpe={d_pe:+,.0f}"
+        else:  # PE
+            if d_pe > 0 and d_ce <= 0:
+                return False, (f"Put writers stacking, call writers absent: "
+                               f"Δpe={d_pe:+,.0f}, Δce={d_ce:+,.0f} — block PE.")
+            if d_ce > 0 and d_pe > OI_DELTA_RATIO_MAX * d_ce:
+                return False, (f"Put OI build outpacing call OI build "
+                               f"({d_pe:+,.0f} > {OI_DELTA_RATIO_MAX}×{d_ce:+,.0f}) — block PE.")
+            return True, f"OI delta OK: Δce={d_ce:+,.0f}, Δpe={d_pe:+,.0f}"
+
     def evaluate(self, spot_close, support, resistance, focus_pcr, oi_pattern,
-                 spot_history, india_vix=15.0, expiry_date=None, current_date=None, scalp_mode=False):
+                 spot_history, india_vix=15.0, expiry_date=None, current_date=None, scalp_mode=False,
+                 now=None):
         """
         Three-Gate entry evaluation:
 
@@ -226,6 +309,13 @@ class SignalEngine:
         """
         direction = None
         reasons = []
+
+        # Snapshot history for slope / OI-delta sub-gates. Use caller-supplied
+        # timestamp when provided (production passes IST; tests/replays pass
+        # historical) so the lookback math stays correct.
+        if now is None:
+            now = datetime.now()
+        self._push_history(now, focus_pcr, oi_pattern)
 
         # Calculate distances to walls
         dist_to_sup = abs(spot_close - support) / spot_close if support > 0 else 999
@@ -271,13 +361,25 @@ class SignalEngine:
                             f"[{FOCUS_PCR_CE_ENTRY_LOW:.2f}-{FOCUS_PCR_CE_ENTRY_HIGH:.2f}]."
                         )
 
-                        # --- GATE 3: OI Build-Up Confirmation ---
-                        oi_confirmed, oi_reason = check_oi_confirmation(oi_pattern, "CE")
-                        if oi_confirmed:
-                            direction = "CE"
-                            reasons.append(f"✅ GATE 3 PASS: {oi_reason}")
+                        # Gate 2a: PCR slope (trend, not just snapshot)
+                        slope_ok, slope_reason = self._check_pcr_slope(now, focus_pcr, "CE")
+                        if not slope_ok:
+                            reasons.append(f"❌ GATE 2a FAIL: {slope_reason}")
                         else:
-                            reasons.append(f"❌ GATE 3 FAIL: {oi_reason}")
+                            reasons.append(f"✅ GATE 2a PASS: {slope_reason}")
+                            # Gate 2b: OI delta ratio (who's writing faster)
+                            oi_delta_ok, oi_delta_reason = self._check_oi_delta_ratio(now, oi_pattern, "CE")
+                            if not oi_delta_ok:
+                                reasons.append(f"❌ GATE 2b FAIL: {oi_delta_reason}")
+                            else:
+                                reasons.append(f"✅ GATE 2b PASS: {oi_delta_reason}")
+                                # --- GATE 3: OI Build-Up Confirmation ---
+                                oi_confirmed, oi_reason = check_oi_confirmation(oi_pattern, "CE")
+                                if oi_confirmed:
+                                    direction = "CE"
+                                    reasons.append(f"✅ GATE 3 PASS: {oi_reason}")
+                                else:
+                                    reasons.append(f"❌ GATE 3 FAIL: {oi_reason}")
                     elif focus_pcr < FOCUS_PCR_CE_ENTRY_LOW:
                         reasons.append(
                             f"❌ GATE 2 FAIL: Focus PCR={focus_pcr:.2f} below "
@@ -323,13 +425,25 @@ class SignalEngine:
                             f"[{FOCUS_PCR_PE_ENTRY_LOW:.2f}-{FOCUS_PCR_PE_ENTRY_HIGH:.2f}]."
                         )
 
-                        # --- GATE 3: OI Build-Up Confirmation ---
-                        oi_confirmed, oi_reason = check_oi_confirmation(oi_pattern, "PE")
-                        if oi_confirmed:
-                            direction = "PE"
-                            reasons.append(f"✅ GATE 3 PASS: {oi_reason}")
+                        # Gate 2a: PCR slope (trend, not just snapshot)
+                        slope_ok, slope_reason = self._check_pcr_slope(now, focus_pcr, "PE")
+                        if not slope_ok:
+                            reasons.append(f"❌ GATE 2a FAIL: {slope_reason}")
                         else:
-                            reasons.append(f"❌ GATE 3 FAIL: {oi_reason}")
+                            reasons.append(f"✅ GATE 2a PASS: {slope_reason}")
+                            # Gate 2b: OI delta ratio (who's writing faster)
+                            oi_delta_ok, oi_delta_reason = self._check_oi_delta_ratio(now, oi_pattern, "PE")
+                            if not oi_delta_ok:
+                                reasons.append(f"❌ GATE 2b FAIL: {oi_delta_reason}")
+                            else:
+                                reasons.append(f"✅ GATE 2b PASS: {oi_delta_reason}")
+                                # --- GATE 3: OI Build-Up Confirmation ---
+                                oi_confirmed, oi_reason = check_oi_confirmation(oi_pattern, "PE")
+                                if oi_confirmed:
+                                    direction = "PE"
+                                    reasons.append(f"✅ GATE 3 PASS: {oi_reason}")
+                                else:
+                                    reasons.append(f"❌ GATE 3 FAIL: {oi_reason}")
                     elif focus_pcr > FOCUS_PCR_PE_ENTRY_HIGH:
                         reasons.append(
                             f"❌ GATE 2 FAIL: Focus PCR={focus_pcr:.2f} above "

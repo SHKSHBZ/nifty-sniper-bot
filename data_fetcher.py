@@ -354,6 +354,8 @@ class DataFetcher:
         oi_pattern = {
             'ce_oi_change': focus_ce_oi_change,
             'pe_oi_change': focus_pe_oi_change,
+            'total_ce_oi': total_ce_oi,
+            'total_pe_oi': total_pe_oi,
         }
 
         return focus_pcr, oi_pattern
@@ -471,7 +473,7 @@ class DataFetcher:
         return mapping.get(f"{float(strike)}_{opt_type}", mapping.get(f"{int(strike)}_{opt_type}", ""))
     def is_fresh(self): return (time.time() - self.cache.get('last_update', 0)) <= 120
     def get_focus_pcr(self): return self.cache.get('focus_pcr', 1.0)
-    def get_oi_pattern(self): return self.cache.get('oi_pattern', {'ce_oi_change': 0, 'pe_oi_change': 0})
+    def get_oi_pattern(self): return self.cache.get('oi_pattern', {'ce_oi_change': 0, 'pe_oi_change': 0, 'total_ce_oi': 0, 'total_pe_oi': 0})
     def get_spot_history(self): return list(self.spot_history)
 
     def get_live_quote(self, instrument_key):

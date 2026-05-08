@@ -87,6 +87,9 @@
     "thetaShieldExpiryMins": 45,
     "thetaShieldNormalMins": 120,
     "telegramAlerts": true,
-    "paperTradeMode": true
+    "paperTradeMode": true,
+    "pcrSlopeLookbackMinutes": 30,
+    "pcrSlopeMaxDrop": 0.05,
+    "oiDeltaRatioMax": 1.5
   }
 }

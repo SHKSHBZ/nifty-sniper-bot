@@ -378,6 +378,7 @@ class TacticDispatcher:
             spot_history=spot_history, india_vix=india_vix,
             expiry_date=fetcher.get_expiry_date(),
             current_date=ts.strftime("%Y-%m-%d"),
+            now=ts,
         )
         if regime is not None and sig.get("direction"):
             sig["reasons"].insert(0, f"[{regime.value}] OI-Wall MR fired")
