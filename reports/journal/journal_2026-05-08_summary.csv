@@ -1,0 +1,2 @@
+date,weekday,n_trades,win_count,loss_count,realized_pnl,cumulative_pnl_after_day,n_missed,n_events
+2026-05-08,Fri,3,0,3,-2888.0,97112.0,20,0
