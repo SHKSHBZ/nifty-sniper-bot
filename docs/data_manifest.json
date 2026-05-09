@@ -1,0 +1,271 @@
+{
+  "version": "1.0",
+  "purpose": "Single source of truth for all historical data the bot needs. User updates 'status' as they download. AI assumes data exists in 'data/' once status='downloaded'.",
+  "data_directory": "data/",
+  "scripts_directory": "backtesting/",
+  "last_updated": "2026-05-08",
+
+  "instructions_for_user": [
+    "1. Look at any dataset with status='pending' and run its 'download_command'",
+    "2. After successful download, change status to 'downloaded' and commit this file",
+    "3. Use 'expected_files' or 'expected_rows' as the sanity check after download",
+    "4. Datasets are ranked by priority; do critical first, then high, then medium",
+    "5. Tell the AI which datasets you completed so it knows what to use"
+  ],
+
+  "indices": {
+    "NIFTY": {
+      "exchange": "NSE",
+      "spot_instrument_key": "NSE_INDEX|Nifty 50",
+      "options_underlying_filter": "NIFTY",
+      "strike_step": 50,
+      "lot_size_current": 65,
+      "weekly_expiry_day": "Tuesday (was Thursday before Sept 2025)",
+      "monthly_futures_expiry": "last Thursday",
+      "datasets": {
+        "spot_1min": {
+          "status": "downloaded",
+          "filename": "NIFTY50_INDEX_1minute.csv",
+          "expected_rows_approx": 183000,
+          "priority": "critical",
+          "download_command": "python -m backtesting.download_spot_vix --symbol nifty"
+        },
+        "options_1min_atm_pm10": {
+          "status": "downloaded",
+          "filename_pattern": "NIFTY_<strike>_<CE|PE>_<DD_MMM_YY>_1min.csv",
+          "expected_files_per_expiry": 42,
+          "expected_total_files": 1900,
+          "expiries_covered": 46,
+          "priority": "critical",
+          "download_command": "python -m backtesting.nifty_historical_downloader"
+        },
+        "futures_1min_with_volume": {
+          "status": "pending",
+          "filename_pattern": "NIFTY_FUT_<DD_MMM_YY>_1min.csv",
+          "expected_files": 24,
+          "expected_rows_per_file": 11000,
+          "priority": "high",
+          "purpose": "Volume Profile / HVN / LVN — spot has no real volume",
+          "download_command": "python -m backtesting.nifty_futures_downloader",
+          "post_processing_command": "python -m backtesting.nifty_futures_continuous"
+        }
+      }
+    },
+
+    "BANKNIFTY": {
+      "exchange": "NSE",
+      "spot_instrument_key": "NSE_INDEX|Nifty Bank",
+      "options_underlying_filter": "BANKNIFTY",
+      "strike_step": 100,
+      "lot_size_current": 35,
+      "weekly_expiry_day": "DISCONTINUED Nov 2024 (SEBI 1-weekly-per-exchange rule)",
+      "monthly_futures_expiry": "last Thursday",
+      "datasets": {
+        "spot_1min": {
+          "status": "pending",
+          "filename": "BANKNIFTY_INDEX_1minute.csv",
+          "expected_rows_approx": 183000,
+          "priority": "critical",
+          "download_command": "python -m backtesting.banknifty_spot_downloader",
+          "note": "SCRIPT NOT YET WRITTEN - mirror download_spot_vix.py"
+        },
+        "options_1min_atm_pm10_monthly": {
+          "status": "pending",
+          "filename_pattern": "BANKNIFTY_<strike>_<CE|PE>_<DD_MMM_YY>_1min.csv",
+          "expected_files_per_expiry": 42,
+          "expected_total_files": 1000,
+          "expiries_covered_target": 24,
+          "priority": "high",
+          "download_command": "python -m backtesting.banknifty_historical_downloader",
+          "note": "SCRIPT NOT YET WRITTEN - only monthly expiries (weekly discontinued)"
+        },
+        "futures_1min_with_volume": {
+          "status": "pending",
+          "filename_pattern": "BANKNIFTY_FUT_<DD_MMM_YY>_1min.csv",
+          "expected_files": 24,
+          "priority": "high",
+          "download_command": "python -m backtesting.banknifty_futures_downloader",
+          "note": "SCRIPT NOT YET WRITTEN - mirror nifty_futures_downloader.py"
+        }
+      }
+    },
+
+    "SENSEX": {
+      "exchange": "BSE",
+      "spot_instrument_key": "BSE_INDEX|SENSEX",
+      "options_underlying_filter": "SENSEX",
+      "strike_step": 100,
+      "lot_size_current": 20,
+      "weekly_expiry_day": "Thursday (after Sept 2025; was Friday until Dec 2024, Tuesday Jan-Aug 2025)",
+      "monthly_futures_expiry": "last Thursday (post Sept 2025)",
+      "datasets": {
+        "spot_1min": {
+          "status": "downloaded",
+          "filename": "SENSEX_INDEX_1minute.csv",
+          "expected_rows_approx": 167000,
+          "priority": "critical",
+          "download_command": "(included in sensex_historical_downloader auto-fetch Phase 1)"
+        },
+        "options_1min_atm_pm10": {
+          "status": "downloaded",
+          "filename_pattern": "SENSEX_<strike>_<CE|PE>_<DD_MMM_YY>_1min.csv",
+          "expected_files_per_expiry": 42,
+          "expected_total_files": 3300,
+          "expiries_covered": 80,
+          "priority": "critical",
+          "download_command": "python -m backtesting.sensex_historical_downloader",
+          "note": "Currently has +/-5 strikes downloaded; +/-10 still in progress"
+        },
+        "futures_1min_with_volume": {
+          "status": "pending",
+          "filename_pattern": "SENSEX_FUT_<DD_MMM_YY>_1min.csv",
+          "expected_files": 24,
+          "priority": "medium",
+          "download_command": "python -m backtesting.sensex_futures_downloader",
+          "note": "SCRIPT NOT YET WRITTEN"
+        }
+      }
+    },
+
+    "BANKEX": {
+      "exchange": "BSE",
+      "spot_instrument_key": "BSE_INDEX|BANKEX",
+      "options_underlying_filter": "BANKEX",
+      "strike_step": 100,
+      "lot_size_current": 30,
+      "weekly_expiry_day": "DISCONTINUED Nov 2024",
+      "monthly_futures_expiry": "last Tuesday (BSE)",
+      "datasets": {
+        "spot_1min": {
+          "status": "pending",
+          "filename": "BANKEX_INDEX_1minute.csv",
+          "priority": "medium",
+          "download_command": "python -m backtesting.bankex_spot_downloader",
+          "note": "SCRIPT NOT YET WRITTEN - liquidity is much thinner than the others"
+        },
+        "options_1min_atm_pm10_monthly": {
+          "status": "pending",
+          "filename_pattern": "BANKEX_<strike>_<CE|PE>_<DD_MMM_YY>_1min.csv",
+          "priority": "low",
+          "download_command": "python -m backtesting.bankex_historical_downloader",
+          "note": "SCRIPT NOT YET WRITTEN - low priority due to thin liquidity"
+        },
+        "futures_1min_with_volume": {
+          "status": "pending",
+          "priority": "low",
+          "note": "Skip unless full BANKEX backtest needed"
+        }
+      }
+    }
+  },
+
+  "shared_data": {
+    "INDIA_VIX_1min": {
+      "instrument_key": "NSE_INDEX|India VIX",
+      "filename": "INDIA_VIX_1minute.csv",
+      "status": "downloaded",
+      "expected_rows_approx": 183000,
+      "priority": "critical",
+      "purpose": "Strategy uses VIX regime + intraday VIX direction"
+    },
+    "NSE_holiday_calendar": {
+      "filename": "nse_holidays.csv",
+      "status": "pending",
+      "priority": "low",
+      "format": "date,holiday_name",
+      "note": "Can be hardcoded from NSE public list - no API call needed",
+      "download_command": "python -m backtesting.build_holiday_calendar"
+    },
+    "BSE_holiday_calendar": {
+      "filename": "bse_holidays.csv",
+      "status": "pending",
+      "priority": "low",
+      "note": "BSE and NSE holidays are usually identical; one calendar covers both"
+    }
+  },
+
+  "computed_outputs": {
+    "purpose": "These are derived from the raw downloaded data — no new download needed, just run the script",
+    "files": {
+      "sr_levels_nifty.csv": {
+        "status": "computed",
+        "script": "python -m backtesting.sr_levels_compute",
+        "depends_on": ["NIFTY.spot_1min"]
+      },
+      "sr_levels_sensex.csv": {
+        "status": "pending",
+        "script": "python -m backtesting.sr_levels_compute",
+        "depends_on": ["SENSEX.spot_1min"]
+      },
+      "sr_levels_banknifty.csv": {
+        "status": "pending",
+        "depends_on": ["BANKNIFTY.spot_1min"]
+      },
+      "sr_levels_bankex.csv": {
+        "status": "pending",
+        "depends_on": ["BANKEX.spot_1min"]
+      },
+      "vix_nifty_daily.csv": {
+        "status": "computed",
+        "script": "python -m backtesting.vix_nifty_relationship",
+        "depends_on": ["NIFTY.spot_1min", "INDIA_VIX_1min"]
+      },
+      "NIFTY_FUT_continuous_1minute.csv": {
+        "status": "pending",
+        "script": "python -m backtesting.nifty_futures_continuous",
+        "depends_on": ["NIFTY.futures_1min_with_volume"]
+      },
+      "NIFTY_FUT_volume_1minute.csv": {
+        "status": "pending",
+        "script": "python -m backtesting.nifty_futures_continuous",
+        "depends_on": ["NIFTY.futures_1min_with_volume"]
+      }
+    }
+  },
+
+  "priority_order_for_new_pc": [
+    "Step 1: pull repo with `git pull origin claude/analyze-bot-strategy-MqYty`",
+    "Step 2: install requirements with `pip install -r requirements.txt`",
+    "Step 3: copy .env (Upstox API key/secret) — DO NOT commit to git",
+    "Step 4: log in via dashboard once to populate state/upstox_session.json",
+    "Step 5: run downloads in this order:",
+    "  5a (CRITICAL): NIFTY spot — `python -m backtesting.download_spot_vix --symbol nifty`",
+    "  5b (CRITICAL): INDIA_VIX — same command, different symbol",
+    "  5c (CRITICAL): NIFTY options — `python -m backtesting.nifty_historical_downloader`",
+    "  5d (CRITICAL): SENSEX spot+options — `python -m backtesting.sensex_historical_downloader`",
+    "  5e (HIGH):     NIFTY futures — `python -m backtesting.nifty_futures_downloader`",
+    "  5f (HIGH):     NIFTY futures stitch — `python -m backtesting.nifty_futures_continuous`",
+    "  5g (MEDIUM):   BANKNIFTY everything (need new scripts AI will write)",
+    "  5h (LOW):      BANKEX everything (need new scripts AI will write)",
+    "Step 6: commit all data — `git add data/ && git commit -m 'data: full refresh' && git push`"
+  ],
+
+  "ai_will_write_these_scripts_when_user_asks": [
+    "backtesting/banknifty_spot_downloader.py",
+    "backtesting/banknifty_historical_downloader.py (options chain)",
+    "backtesting/banknifty_futures_downloader.py",
+    "backtesting/sensex_futures_downloader.py",
+    "backtesting/bankex_spot_downloader.py",
+    "backtesting/bankex_historical_downloader.py",
+    "backtesting/build_holiday_calendar.py"
+  ],
+
+  "estimated_total_download_time_minutes": {
+    "step_5a_5d_existing": 60,
+    "step_5e_5f_nifty_futures": 10,
+    "step_5g_banknifty": 30,
+    "step_5h_bankex": 20,
+    "total_full_refresh": 120
+  },
+
+  "estimated_total_disk_size_mb": {
+    "nifty_options": 200,
+    "sensex_options": 200,
+    "banknifty_options": 100,
+    "bankex_options": 50,
+    "all_spot_files": 60,
+    "all_futures_files": 80,
+    "vix_holidays_metadata": 10,
+    "total_approx_mb": 700
+  }
+}
