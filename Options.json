@@ -114,6 +114,13 @@
     "t1TpPct": 0.30,
     "t1SlPct": 0.30,
     "t1TrailBePct": 0.20,
-    "t1TimeStopMin": 295
+    "t1TimeStopMin": 295,
+    "t2Enabled": true,
+    "t2DecisionTimeStart": "14:50",
+    "t2DecisionTimeEnd": "15:00",
+    "t2MinPremiumPerLeg": 5.0,
+    "t2MaxPremiumPerLeg": 20.0,
+    "t2CombinedSlPct": 0.50,
+    "t2TimeStopMin": 35
   }
 }
