@@ -86,6 +86,8 @@ class TacticState:
     vix_chg_15m: float = 0.0
     vix_chg_today_pct: float = 0.0   # VIX % change since today's open (used by T1)
     vix_open_today: float = 0.0      # raw open-of-day VIX (for diagnostics)
+    atm_ce_premium: float = 0.0      # current ATM CE LTP (used by T2 straddle)
+    atm_pe_premium: float = 0.0      # current ATM PE LTP (used by T2 straddle)
 
     # Regime classifier output (string form of Regime enum)
     regime: str = "RANGE"
@@ -123,8 +125,23 @@ class TacticSignal:
     # Optional: override default trail / exit logic at the simulator level
     use_hybrid_trail: bool = False      # True => tactic wants EMA9-based trail
 
+    # ----- Two-leg / straddle support (T2 expiry straddle, etc.) -----
+    # When `second_direction` is set, the signal represents a straddle/strangle
+    # — caller must place BOTH legs simultaneously, and SL/TP apply to the
+    # COMBINED premium (sum of both legs), not per-leg.
+    # Existing tactics ignore these fields entirely (backward compatible).
+    second_direction: Optional[DirectionType] = None    # second leg type (CE or PE)
+    second_strike_offset: int = 0                        # second leg strike offset
+    combined_sl_pct: Optional[float] = None              # SL on combined premium (e.g. 0.50 = 50% SL)
+    combined_tp_pct: Optional[float] = None              # TP on combined premium (None = no TP)
+
     # Audit trail
     reason: str = ""
+
+    @property
+    def is_straddle(self) -> bool:
+        """True if this signal carries two legs (straddle/strangle)."""
+        return self.second_direction is not None
 
 
 # ---------------------------------------------------------------------------

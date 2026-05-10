@@ -50,7 +50,7 @@ SESSION_FILE = BASE_DIR / "state" / "upstox_session.json"
 # 4-bot view: legacy + regime mode for each index. The regime variants
 # point at *_regime files written by the bot when launched with the
 # regime config files.
-BOT_TYPES = ["NIFTY", "SENSEX", "NIFTY_REGIME", "SENSEX_REGIME", "NIFTY_T1"]
+BOT_TYPES = ["NIFTY", "SENSEX", "NIFTY_REGIME", "SENSEX_REGIME", "NIFTY_T1", "NIFTY_T2"]
 tracked_pids = {b: None for b in BOT_TYPES}
 
 
@@ -59,11 +59,13 @@ def _suffix(bot_type: str) -> str:
     NIFTY/SENSEX → 'NIFTY'/'SENSEX'  (legacy files, no extra suffix).
     NIFTY_REGIME → 'NIFTY_regime'.
     NIFTY_T1     → 'NIFTY_t1'.
+    NIFTY_T2     → 'NIFTY_t2'.
     """
     bt = bot_type.upper()
     if bt == "NIFTY_REGIME":  return "NIFTY_regime"
     if bt == "SENSEX_REGIME": return "SENSEX_regime"
     if bt == "NIFTY_T1":      return "NIFTY_t1"
+    if bt == "NIFTY_T2":      return "NIFTY_t2"
     return bt
 
 # --- Live indices cache (1s TTL) ---
@@ -112,7 +114,9 @@ def find_running_bots():
             is_sensex = 'config_sensex' in cmd_str
             is_regime = '_regime' in cmd_str
             is_t1     = 'config_t1' in cmd_str
+            is_t2     = 'config_t2' in cmd_str
             if is_t1:                   found["NIFTY_T1"] = proc.pid
+            elif is_t2:                 found["NIFTY_T2"] = proc.pid
             elif is_sensex and is_regime: found["SENSEX_REGIME"] = proc.pid
             elif is_sensex:             found["SENSEX"] = proc.pid
             elif is_regime:             found["NIFTY_REGIME"] = proc.pid
@@ -163,6 +167,7 @@ def start_bot(bot_type: str):
         "SENSEX":        "config_sensex.json",
         "SENSEX_REGIME": "config_sensex_regime.json",
         "NIFTY_T1":      "project_config_t1.json",
+        "NIFTY_T2":      "project_config_t2.json",
     }
     cmd = [sys.executable, str(BASE_DIR / "main.py"), config_map[bot_type]]
 
