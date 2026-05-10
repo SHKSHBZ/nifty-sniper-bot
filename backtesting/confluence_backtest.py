@@ -83,23 +83,64 @@ def _within_trading_window(ts: pd.Timestamp) -> bool:
     return NO_ENTRIES_BEFORE <= t < NO_ENTRIES_AFTER
 
 
+def _structural_sl(
+    direction: str,
+    entry_price: float,
+    supports: list[tuple[str, float]],
+    resistances: list[tuple[str, float]],
+    *,
+    max_sl_pct: float,
+    fallback_sl_pct: float,
+) -> tuple[float, str]:
+    """Place SL at nearest opposite S/R level. LONG -> nearest support
+    below entry. SHORT -> nearest resistance above entry.
+
+    If the chosen level is more than max_sl_pct away (would risk too
+    much), fall back to fixed fallback_sl_pct. Returns (sl_price, label).
+    """
+    if direction == "long":
+        # Supports BELOW entry, sorted descending (nearest first)
+        candidates = sorted(
+            [(lbl, p) for lbl, p in supports if p < entry_price],
+            key=lambda x: -x[1],
+        )
+    else:
+        # Resistances ABOVE entry, sorted ascending (nearest first)
+        candidates = sorted(
+            [(lbl, p) for lbl, p in resistances if p > entry_price],
+            key=lambda x: x[1],
+        )
+
+    fallback = (
+        entry_price * (1 - fallback_sl_pct / 100) if direction == "long"
+        else entry_price * (1 + fallback_sl_pct / 100)
+    )
+    if not candidates:
+        return fallback, f"fallback_{fallback_sl_pct}%"
+
+    label, price = candidates[0]
+    distance_pct = abs(price - entry_price) / entry_price * 100
+    if distance_pct > max_sl_pct:
+        return fallback, f"fallback_{fallback_sl_pct}% (nearest {label} was {distance_pct:.2f}% > cap)"
+    return price, f"{label}@{price:.2f} ({distance_pct:.2f}%)"
+
+
 def _simulate_exit(
     bars: pd.DataFrame,
     entry_idx: int,
     direction: str,
     entry_price: float,
     tp_pct: float,
-    sl_pct: float,
+    sl_price: float,
 ) -> tuple[int, float, str]:
     """Walk forward from entry_idx until TP, SL, or EOD. Returns
-    (exit_idx, exit_price, exit_reason).
+    (exit_idx, exit_price, exit_reason). SL is now a PRICE (computed by
+    caller — could be % or structural).
     """
     if direction == "long":
         tp_price = entry_price * (1 + tp_pct / 100)
-        sl_price = entry_price * (1 - sl_pct / 100)
     else:
         tp_price = entry_price * (1 - tp_pct / 100)
-        sl_price = entry_price * (1 + sl_pct / 100)
 
     n = len(bars)
     for j in range(entry_idx + 1, n):
@@ -132,6 +173,10 @@ def run_backtest(
     *,
     tp_pct: float = TP_PCT,
     sl_pct: float = SL_PCT,
+    sr_provider: Optional['SRProvider'] = None,  # if set, use structural SL
+    structural_sl_max_pct: float = 1.0,
+    structural_sl_buffer_pct: float = 0.0,
+    score_threshold: float = 4.0,
     cooldown_min: int = COOLDOWN_MIN,
     consec_loss_pause: int = CONSEC_LOSS_PAUSE,
     pause_min: int = PAUSE_MIN,
@@ -148,7 +193,7 @@ def run_backtest(
         ts = sig.timestamp
         if not _within_trading_window(ts):
             continue
-        direction = sig.trade_direction
+        direction = sig.direction_at(score_threshold)
         if direction is None:
             continue
 
@@ -166,8 +211,24 @@ def run_backtest(
         i = bar_idx[ts]
         entry_price = sig.spot_price
 
+        # Determine SL price: structural (S/R based) or fixed %
+        if sr_provider is not None:
+            supports, resistances = sr_provider.levels_for(ts.date())
+            sl_price, sl_label = _structural_sl(
+                direction, entry_price, supports, resistances,
+                max_sl_pct=structural_sl_max_pct, fallback_sl_pct=sl_pct,
+            )
+            # Apply buffer: push SL further past the level by buffer_pct
+            if structural_sl_buffer_pct > 0:
+                buf = entry_price * structural_sl_buffer_pct / 100
+                sl_price = sl_price - buf if direction == "long" else sl_price + buf
+        else:
+            sl_price = (entry_price * (1 - sl_pct / 100) if direction == "long"
+                        else entry_price * (1 + sl_pct / 100))
+            sl_label = f"fixed_{sl_pct}%"
+
         exit_i, exit_price, reason = _simulate_exit(
-            bars_5m, i, direction, entry_price, tp_pct, sl_pct,
+            bars_5m, i, direction, entry_price, tp_pct, sl_price,
         )
         exit_ts = bars_5m.index[exit_i]
 
@@ -239,6 +300,12 @@ def main():
     p.add_argument("--tp", type=float, default=TP_PCT)
     p.add_argument("--sl", type=float, default=SL_PCT)
     p.add_argument("--cooldown", type=int, default=COOLDOWN_MIN)
+    p.add_argument("--structural-sl", action="store_true",
+                   help="Use S/R levels as SL (LONG=nearest support below, "
+                        "SHORT=nearest resistance above) instead of fixed %%.")
+    p.add_argument("--max-structural-sl", type=float, default=1.0,
+                   help="Cap structural SL distance to this %% of price; "
+                        "fall back to --sl beyond that. Default 1.0%%.")
     p.add_argument("--out-csv", default=None,
                    help="Path to write trade ledger CSV (default reports/confluence_trades.csv)")
     args = p.parse_args()
@@ -260,10 +327,14 @@ def main():
     print(f"  {len(signals):,} decision points  -> "
           f"{sum(1 for s in signals if s.trade_direction):,} trade-worthy raw signals\n")
 
-    print(f"Running backtest: TP={args.tp}%  SL={args.sl}%  cooldown={args.cooldown}min\n")
+    sl_desc = (f"structural (S/R-based, capped at {args.max_structural_sl}%)"
+               if args.structural_sl else f"{args.sl}% fixed")
+    print(f"Running backtest: TP={args.tp}%  SL={sl_desc}  cooldown={args.cooldown}min\n")
     trades = run_backtest(
         signals, df_5m,
         tp_pct=args.tp, sl_pct=args.sl, cooldown_min=args.cooldown,
+        sr_provider=sr if args.structural_sl else None,
+        structural_sl_max_pct=args.max_structural_sl,
     )
 
     s = summarize(trades)
@@ -285,9 +356,15 @@ def main():
     print(f"  Exit reasons:     {s['exit_reasons']}")
 
     out = Path(args.out_csv) if args.out_csv else REPORTS / "confluence_trades.csv"
+    if not out.is_absolute():
+        out = ROOT / out
     out.parent.mkdir(parents=True, exist_ok=True)
     pd.DataFrame([t.__dict__ for t in trades]).to_csv(out, index=False)
-    print(f"\nTrade ledger written: {out.relative_to(ROOT)}")
+    try:
+        rel = out.relative_to(ROOT)
+    except ValueError:
+        rel = out
+    print(f"\nTrade ledger written: {rel}")
 
 
 if __name__ == "__main__":

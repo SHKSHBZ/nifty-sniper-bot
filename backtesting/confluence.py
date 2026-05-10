@@ -42,6 +42,7 @@ from backtesting.volume_profile import (
 )
 from backtesting.fibonacci import FibLevels, latest_fib_leg
 from backtesting.fair_value_gaps import FVG, detect_gaps, active_gaps_at
+from backtesting.candle_patterns import any_bullish_pattern, any_bearish_pattern
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -72,9 +73,12 @@ class ConfluenceSignal:
 
     @property
     def trade_direction(self) -> Optional[str]:
-        if self.score_long >= MIN_SCORE_TO_TRADE and self.score_long > self.score_short:
+        return self.direction_at(MIN_SCORE_TO_TRADE)
+
+    def direction_at(self, threshold: float) -> Optional[str]:
+        if self.score_long >= threshold and self.score_long > self.score_short:
             return "long"
-        if self.score_short >= MIN_SCORE_TO_TRADE and self.score_short > self.score_long:
+        if self.score_short >= threshold and self.score_short > self.score_long:
             return "short"
         return None
 
@@ -118,6 +122,21 @@ class SRProvider:
 
 def _within_pct(price: float, level: float, pct: float) -> bool:
     return abs(price - level) / level * 100 <= pct
+
+
+def eval_candle(prev_bar, cur_bar, min_body: float = 5.0) -> PillarResult:
+    """Pillar 1: bullish reversal pattern -> long bias; bearish -> short.
+    prev_bar / cur_bar are tuples (open, high, low, close) or None.
+    """
+    if cur_bar is None:
+        return PillarResult("candle_pattern", False, None, 1.0, "no current bar")
+    bull_match, bull_name = any_bullish_pattern(prev_bar, cur_bar, min_body=min_body)
+    if bull_match:
+        return PillarResult("candle_pattern", True, "long", 1.0, f"bullish {bull_name}")
+    bear_match, bear_name = any_bearish_pattern(prev_bar, cur_bar, min_body=min_body)
+    if bear_match:
+        return PillarResult("candle_pattern", True, "short", 1.0, f"bearish {bear_name}")
+    return PillarResult("candle_pattern", False, None, 1.0, "no pattern")
 
 
 def eval_sr(spot: float, supports: list, resistances: list) -> PillarResult:
@@ -309,7 +328,17 @@ def score_signals(
         vnow = float(vol_5m.iloc[i])
         vavg = float(vol_avg.iloc[i]) if not np.isnan(vol_avg.iloc[i]) else 0
 
+        # Bars for candle pattern
+        cur_bar = (float(row["open"]), float(row["high"]),
+                   float(row["low"]),  float(row["close"]))
+        prev_bar = None
+        if i > 0:
+            prev = df_5m.iloc[i - 1]
+            prev_bar = (float(prev["open"]), float(prev["high"]),
+                        float(prev["low"]),  float(prev["close"]))
+
         pillars = [
+            eval_candle(prev_bar, cur_bar),
             eval_sr(spot, supports, resistances),
             eval_volume_profile(spot, vp),
             eval_approach_volume(spot, prev_close, vnow, vavg, vp),
