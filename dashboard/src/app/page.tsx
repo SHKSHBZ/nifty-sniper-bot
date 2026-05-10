@@ -20,7 +20,7 @@ import type {
   PortfolioStats, BotStatus, BotName,
 } from "@/types";
 
-const BOT_LIST: BotName[] = ["NIFTY", "SENSEX", "NIFTY_REGIME", "SENSEX_REGIME"];
+const BOT_LIST: BotName[] = ["NIFTY", "SENSEX", "NIFTY_REGIME", "SENSEX_REGIME", "NIFTY_T1"];
 type Tab = "live" | "control" | "logs" | "trades";
 
 export default function Dashboard() {

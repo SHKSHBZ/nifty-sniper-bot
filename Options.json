@@ -102,6 +102,18 @@
     "chopRangeLookbackMinutes": 60,
     "chopRangeMaxPct": 0.005,
     "iefEnabled": true,
-    "iefMinHistoryBars": 10
+    "iefMinHistoryBars": 10,
+    "t1Enabled": true,
+    "t1DecisionTimeStart": "10:00",
+    "t1DecisionTimeEnd": "10:30",
+    "t1VixMin": 13.0,
+    "t1VixMax": 18.0,
+    "t1VixChangeMinPct": 0.5,
+    "t1DteMin": 2,
+    "t1DteMax": 6,
+    "t1TpPct": 0.30,
+    "t1SlPct": 0.30,
+    "t1TrailBePct": 0.20,
+    "t1TimeStopMin": 295
   }
 }
