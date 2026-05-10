@@ -1,9 +1,14 @@
 {
-  "version": "1.0",
+  "version": "1.1",
   "purpose": "Single source of truth for all historical data the bot needs. User updates 'status' as they download. AI assumes data exists in 'data/' once status='downloaded'.",
   "data_directory": "data/",
   "scripts_directory": "backtesting/",
-  "last_updated": "2026-05-08",
+  "last_updated": "2026-05-10",
+  "backtest_window_decision": {
+    "effective_window": "2024-11 to 2025-08 (~12 months)",
+    "reason": "Upstox /v2/expired-instruments/future/* has a rolling ~12-month retention; contracts expiring Sep 2025 or later return empty payloads and cannot be fetched. Spot/VIX/options cover the full 18 months but futures volume only covers Nov 2024 -> Aug 2025. To keep Volume Profile inputs consistent, all backtests run on the Nov 2024 -> Aug 2025 window.",
+    "decided_on": "2026-05-10"
+  },
 
   "instructions_for_user": [
     "1. Look at any dataset with status='pending' and run its 'download_command'",
@@ -40,14 +45,17 @@
           "download_command": "python -m backtesting.nifty_historical_downloader"
         },
         "futures_1min_with_volume": {
-          "status": "pending",
+          "status": "partial_downloaded",
           "filename_pattern": "NIFTY_FUT_<DD_MMM_YY>_1min.csv",
-          "expected_files": 24,
+          "files_on_disk": 9,
+          "coverage_actual": "2024-08-30 to 2025-08-28 (Nov-24 through Aug-25 contracts; Dec-24 returned empty candles, others past Aug-25 not in Upstox retention)",
+          "expected_files_target": 18,
           "expected_rows_per_file": 11000,
           "priority": "high",
           "purpose": "Volume Profile / HVN / LVN — spot has no real volume",
-          "download_command": "python -m backtesting.nifty_futures_downloader",
-          "post_processing_command": "python -m backtesting.nifty_futures_continuous"
+          "download_command": "python -m backtesting.nifty_futures_downloader --months 18",
+          "post_processing_command": "python -m backtesting.nifty_futures_continuous",
+          "limitation": "Upstox /v2/expired-instruments/future/* retains only ~12 months of contracts; Sep-25 onwards returns no data."
         }
       }
     },

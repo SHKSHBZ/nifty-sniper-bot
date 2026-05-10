@@ -29,6 +29,7 @@ data/*_1minute.csv
 historical/
 *.log
 *.txt
+!requirements.txt
 
 # AI Conversations
 gemini-conversation*.json

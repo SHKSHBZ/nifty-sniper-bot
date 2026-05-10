@@ -84,6 +84,8 @@ class TacticState:
     pe_oi_change: float = 0.0
     vix_level: float = 15.0
     vix_chg_15m: float = 0.0
+    vix_chg_today_pct: float = 0.0   # VIX % change since today's open (used by T1)
+    vix_open_today: float = 0.0      # raw open-of-day VIX (for diagnostics)
 
     # Regime classifier output (string form of Regime enum)
     regime: str = "RANGE"

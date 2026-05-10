@@ -15,6 +15,7 @@ Resumable: skips files already on disk.
 """
 from __future__ import annotations
 
+import argparse
 import logging
 import time
 from datetime import date, datetime, timedelta
@@ -40,7 +41,7 @@ EXPIRED_CANDLE_URL = (
     "/{key}/{interval}/{to}/{frm}"
 )
 
-SLEEP_SECONDS = 0.5
+SLEEP_SECONDS = 1.0
 LOOKBACK_PER_CONTRACT_DAYS = 90  # contracts trade for 60-90 days before expiry
 WINDOW_MONTHS = 24
 
@@ -128,6 +129,13 @@ def download_candles(headers: dict, instrument_key: str,
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--months", type=int, default=WINDOW_MONTHS,
+                        help="How many monthly contracts back to fetch "
+                             "(default %(default)d). Upstox typically retains "
+                             "~18 months of expired-instrument data.")
+    args = parser.parse_args()
+
     auth = UpstoxAuth()
     if not auth.is_session_valid():
         log.error("Upstox session invalid. Authenticate via dashboard first.")
@@ -137,7 +145,7 @@ def main():
         "Accept": "application/json",
     }
 
-    expiries = generate_recent_expiries()
+    expiries = generate_recent_expiries(months_back=args.months)
     log.info(f"Generated {len(expiries)} monthly expiries: "
              f"{expiries[0]} → {expiries[-1]}")
 

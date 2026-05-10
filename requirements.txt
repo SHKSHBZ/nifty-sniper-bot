@@ -1,0 +1,30 @@
+# Generated 2026-05-09 from AST scan of all .py imports.
+# Tested against Python 3.11.
+#
+# CORE — required to run the data downloads (spot, VIX, options, futures).
+pandas>=2.1
+requests>=2.31
+python-dotenv>=1.0
+pytz>=2024.1
+
+# Upstox SDK — used by live data_fetcher.py / executor; downloads use
+# the raw REST API, so this is only needed for live trading.
+upstox-python-sdk>=1.10
+
+# Strategy / backtest tooling.
+numpy>=1.26
+pyyaml>=6.0
+
+# Backend dashboard (FastAPI app under backend/).
+fastapi>=0.110
+uvicorn>=0.27
+pydantic>=2.5
+psutil>=5.9
+pyzmq>=25
+
+# Tests.
+pytest>=8.0
+
+# Kite Connect — only needed if you also wire Zerodha. Safe to comment
+# out if Upstox-only.
+kiteconnect>=5.0

@@ -112,12 +112,27 @@ class TacticDispatcher:
         from tactics.ief import IEFConfig as _IEFConfig
         self.ief_tactic = IEFTactic(_IEFConfig(min_history_bars=ief_min_bars))
 
+        # T1 VIX-Direction tactic (PR #4 backtest: +Rs.71,827 over 19 months
+        # on Rs.20k/trade, +45.6% annual on Rs.1L). Fires AT MOST once per
+        # day in the [10:00, 10:30] window when VIX gates pass. Independent
+        # of regime — has its own selectivity built in.
+        from tactics.t1_vix_direction import T1VIXDirectionTactic, T1Config
+        self.t1_enabled = bool(opts.get("t1Enabled", True))
+        self.t1_tactic = T1VIXDirectionTactic(T1Config())
+        self._t1_fired_date = None       # date of last T1 firing (one per day)
+        self._vix_open_today = None      # first VIX tick of the current day
+        self._vix_open_date = None       # date of recorded vix open
+
     # ----- lifecycle ----------------------------------------------------
 
     def reset_for_new_day(self, day, prev_day_close: float) -> None:
         self.indicators.start_day(day, prev_day_close)
         self.classifier._current = None     # type: ignore[attr-defined]
         self.classifier._candidate = None   # type: ignore[attr-defined]
+        # T1: re-arm for the new session, forget yesterday's VIX-open.
+        self._t1_fired_date = None
+        self._vix_open_today = None
+        self._vix_open_date = None
         log.info("dispatcher: reset for %s (prev_close=%.1f)", day, prev_day_close)
 
     # ----- per-tick state ingest ----------------------------------------
@@ -159,6 +174,41 @@ class TacticDispatcher:
         expiry_str = fetcher.get_expiry_date()
         dte = self._compute_dte(expiry_str, ts)
         is_expiry = (dte <= 0)
+
+        # Anchor today's VIX open as early as possible (first valid tick of
+        # the day). _build_tactic_state() will reuse the cached value.
+        _ = self._compute_vix_chg_today_pct(vix, ts)
+
+        # ---- T1 VIX-Direction (high-priority, runs before regime routing) ----
+        # Fires AT MOST once per day in the [10:00, 10:30] window with
+        # specific VIX gates. If it fires, return immediately — it has
+        # higher conviction than the broad regime tactics.
+        if (self.t1_enabled
+                and not in_position
+                and self._t1_fired_date != ts.date()):
+            t1_state = self._build_tactic_state(
+                ts=ts, snap=snap, spot=spot, vix=vix, focus_pcr=focus_pcr,
+                oi_pattern=oi_pattern, support=support, resistance=resistance,
+                dte=dte, expiry_str=expiry_str,
+                regime=Regime.RANGE,    # placeholder; T1 doesn't read regime
+                in_position=in_position,
+                position_direction=position_direction,
+                position_entry_premium=position_entry_premium,
+                position_lots_added=position_lots_added,
+            )
+            t1_sig = self.t1_tactic.evaluate(t1_state)
+            if t1_sig is not None:
+                self._t1_fired_date = ts.date()
+                # Use a placeholder regime label so the legacy dict format
+                # is happy. Real regime classification happens below for
+                # other tactics — T1 doesn't depend on it.
+                legacy = _legacy_signal_from_tactic(
+                    t1_sig, Regime.RANGE, dte, is_expiry,
+                )
+                legacy["tactic_name"] = "t1_vix_direction"
+                legacy["near_misses"] = []
+                log.info("T1 fired: %s", t1_sig.reason)
+                return legacy
 
         # Build classifier features (with what we have — some fields stubbed)
         feat = ClassifierFeatures(
@@ -326,6 +376,8 @@ class TacticDispatcher:
         ]
         if self.ief_enabled:
             candidates.append(("ief", self.ief_tactic))
+        if self.t1_enabled:
+            candidates.append(("t1_vix_direction", self.t1_tactic))
 
         for tactic_name, tactic_obj in candidates:
             try:
@@ -446,6 +498,8 @@ class TacticDispatcher:
             pe_oi_change=oi_pattern.get("pe_oi_change", 0),
             vix_level=vix,
             vix_chg_15m=0.0,
+            vix_chg_today_pct=self._compute_vix_chg_today_pct(vix, ts),
+            vix_open_today=self._vix_open_today or 0.0,
             regime=regime.value,
             is_in_position=in_position,
             open_position_direction=position_direction,
@@ -462,3 +516,20 @@ class TacticDispatcher:
         except (ValueError, TypeError):
             return 99
         return max(0, (exp - ts.date()).days)
+
+    def _compute_vix_chg_today_pct(self, vix: float, ts: datetime) -> float:
+        """Capture today's VIX open on the first valid tick of the day,
+        then return % change vs that anchor on every subsequent tick.
+        Returns 0.0 if VIX is unavailable or invalid.
+        """
+        if vix is None or vix <= 0:
+            return 0.0
+        today = ts.date()
+        if self._vix_open_date != today:
+            # First tick of a new session — anchor and return zero.
+            self._vix_open_today = vix
+            self._vix_open_date = today
+            return 0.0
+        if not self._vix_open_today:
+            return 0.0
+        return (vix / self._vix_open_today - 1.0) * 100.0
