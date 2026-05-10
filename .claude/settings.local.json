@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"import ast; ast.parse\\(open\\('backtesting/nifty_futures_downloader.py'\\).read\\(\\)\\); print\\('OK: syntax valid'\\)\")"
+    ]
+  }
+}
