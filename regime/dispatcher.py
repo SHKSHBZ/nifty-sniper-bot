@@ -61,8 +61,10 @@ def _legacy_signal_from_tactic(
     sig: TacticSignal, regime: Regime, dte: int, is_expiry: bool
 ) -> dict:
     """Convert a new-style TacticSignal back to the legacy dict format
-    that main.py's _scan_for_entries already consumes."""
-    return {
+    that main.py's _scan_for_entries already consumes. When the signal
+    is a straddle (sig.is_straddle), extra second-leg fields are added
+    so main.py knows to place both legs."""
+    out = {
         "direction": sig.direction,
         "reasons": [
             f"[{regime.value}] {sig.reason}",
@@ -81,6 +83,13 @@ def _legacy_signal_from_tactic(
         "tactic_strike_offset": sig.strike_offset,
         "use_hybrid_trail": sig.use_hybrid_trail,
     }
+    if sig.is_straddle:
+        out["is_straddle"] = True
+        out["second_direction"] = sig.second_direction
+        out["second_strike_offset"] = sig.second_strike_offset
+        out["combined_sl_pct"] = sig.combined_sl_pct
+        out["combined_tp_pct"] = sig.combined_tp_pct
+    return out
 
 
 class TacticDispatcher:
@@ -123,14 +132,23 @@ class TacticDispatcher:
         self._vix_open_today = None      # first VIX tick of the current day
         self._vix_open_date = None       # date of recorded vix open
 
+        # T2 Expiry Straddle (PR #4 backtest: +Rs.67,997 over 18 months on
+        # Rs.20k/trade, +45.0% annual on Rs.1L). Fires only on expiry days
+        # in [14:50, 15:00] window. Two-leg straddle (ATM CE + ATM PE).
+        from tactics.t2_expiry_straddle import T2ExpiryStraddleTactic, T2Config
+        self.t2_enabled = bool(opts.get("t2Enabled", True))
+        self.t2_tactic = T2ExpiryStraddleTactic(T2Config())
+        self._t2_fired_date = None       # date of last T2 firing (one per day)
+
     # ----- lifecycle ----------------------------------------------------
 
     def reset_for_new_day(self, day, prev_day_close: float) -> None:
         self.indicators.start_day(day, prev_day_close)
         self.classifier._current = None     # type: ignore[attr-defined]
         self.classifier._candidate = None   # type: ignore[attr-defined]
-        # T1: re-arm for the new session, forget yesterday's VIX-open.
+        # T1 + T2: re-arm for the new session, forget yesterday's anchors.
         self._t1_fired_date = None
+        self._t2_fired_date = None
         self._vix_open_today = None
         self._vix_open_date = None
         log.info("dispatcher: reset for %s (prev_close=%.1f)", day, prev_day_close)
@@ -208,6 +226,49 @@ class TacticDispatcher:
                 legacy["tactic_name"] = "t1_vix_direction"
                 legacy["near_misses"] = []
                 log.info("T1 fired: %s", t1_sig.reason)
+                return legacy
+
+        # ---- T2 Expiry Straddle (high-priority, expiry days only) ----
+        # Fires AT MOST once per day in the [14:50, 15:00] window on
+        # expiry day (DTE==0) when both ATM legs are in the [5, 20]
+        # premium band. Two-leg straddle — caller must place both legs.
+        if (self.t2_enabled
+                and not in_position
+                and dte == 0
+                and self._t2_fired_date != ts.date()
+                and self.t2_tactic.config.decision_time_start <= ts.time()
+                                                              <= self.t2_tactic.config.decision_time_end):
+            atm_strike = int(round(spot / self.strike_step) * self.strike_step)
+            try:
+                ce_premium = float(fetcher.get_option_ltp(atm_strike, "CE") or 0.0)
+                pe_premium = float(fetcher.get_option_ltp(atm_strike, "PE") or 0.0)
+            except Exception as e:
+                log.warning("T2: ATM premium lookup failed: %s", e)
+                ce_premium = pe_premium = 0.0
+
+            t2_state = self._build_tactic_state(
+                ts=ts, snap=snap, spot=spot, vix=vix, focus_pcr=focus_pcr,
+                oi_pattern=oi_pattern, support=support, resistance=resistance,
+                dte=dte, expiry_str=expiry_str,
+                regime=Regime.RANGE,    # placeholder; T2 doesn't read regime
+                in_position=in_position,
+                position_direction=position_direction,
+                position_entry_premium=position_entry_premium,
+                position_lots_added=position_lots_added,
+            )
+            # Inject ATM premiums fetched above
+            t2_state.atm_ce_premium = ce_premium
+            t2_state.atm_pe_premium = pe_premium
+
+            t2_sig = self.t2_tactic.evaluate(t2_state)
+            if t2_sig is not None:
+                self._t2_fired_date = ts.date()
+                legacy = _legacy_signal_from_tactic(
+                    t2_sig, Regime.RANGE, dte, is_expiry,
+                )
+                legacy["tactic_name"] = "t2_expiry_straddle"
+                legacy["near_misses"] = []
+                log.info("T2 fired: %s", t2_sig.reason)
                 return legacy
 
         # Build classifier features (with what we have — some fields stubbed)
@@ -378,6 +439,8 @@ class TacticDispatcher:
             candidates.append(("ief", self.ief_tactic))
         if self.t1_enabled:
             candidates.append(("t1_vix_direction", self.t1_tactic))
+        if self.t2_enabled:
+            candidates.append(("t2_expiry_straddle", self.t2_tactic))
 
         for tactic_name, tactic_obj in candidates:
             try:

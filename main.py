@@ -29,7 +29,9 @@ todays_date = datetime.now(IST).strftime("%Y-%m-%d")
 index_str = "SENSEX" if (len(sys.argv) > 1 and "sensex" in sys.argv[1].lower()) else "NIFTY"
 _is_regime_arg = (len(sys.argv) > 1 and "_regime" in sys.argv[1].lower())
 _is_t1_arg     = (len(sys.argv) > 1 and "_t1" in sys.argv[1].lower())
+_is_t2_arg     = (len(sys.argv) > 1 and "_t2" in sys.argv[1].lower())
 if _is_t1_arg:       _log_suffix = "_t1"
+elif _is_t2_arg:     _log_suffix = "_t2"
 elif _is_regime_arg: _log_suffix = "_regime"
 else:                _log_suffix = ""
 log_file_path = f"logs/sniper_bot_{index_str}{_log_suffix}_{todays_date}.log"
@@ -79,10 +81,12 @@ class LiveOrchestrator:
         # so multiple engines can run side-by-side on the same index without
         # overwriting each other's portfolios.
         self.engine_mode = self.config.get("engine_mode", "legacy")
-        # T1 variant takes precedence over regime suffix (T1 is its own bot,
-        # even though it internally runs in regime mode).
+        # T1/T2 variants take precedence over regime suffix (each is its
+        # own bot, though they internally run in regime mode).
         if "_t1" in config_file.lower():
             self.portfolio_file = Path(f"data/paper_portfolio_{index_str}_t1.json")
+        elif "_t2" in config_file.lower():
+            self.portfolio_file = Path(f"data/paper_portfolio_{index_str}_t2.json")
         elif self.engine_mode == "regime":
             self.portfolio_file = Path(f"data/paper_portfolio_{index_str}_regime.json")
         else:
@@ -114,6 +118,8 @@ class LiveOrchestrator:
         # bots, so legacy / regime / t1 don't overwrite each other's state.
         if "_t1" in config_file.lower():
             state_index = index_str + "_t1"
+        elif "_t2" in config_file.lower():
+            state_index = index_str + "_t2"
         elif self.engine_mode == "regime":
             state_index = index_str + "_regime"
         else:
@@ -163,6 +169,8 @@ class LiveOrchestrator:
                 self.portfolio = json.load(f)
         else:
             self.portfolio = {"capital": 100000.0, "open_position": None, "trade_history": []}
+        # T2: ensure the straddle slot exists (None if not currently active)
+        self.portfolio.setdefault("open_straddle", None)
 
     def save_portfolio(self):
         self.portfolio_file.parent.mkdir(exist_ok=True)
@@ -197,17 +205,25 @@ class LiveOrchestrator:
                 # Publish current state for the dashboard backend.
                 self._publish_state(now)
 
-                # At market close (15:30 IST): flatten any open position
+                # At market close (15:30 IST): flatten any open position(s)
                 # and shut down. New entries are allowed all the way up to
                 # the close — no earlier cutoff.
                 if t >= MARKET_CLOSE:
                     if self.portfolio["open_position"]:
                         self._close_position("Market Close (15:30 IST)")
+                    if self.portfolio.get("open_straddle"):
+                        self._close_straddle("Market Close (15:30 IST)")
                     logger.info("Market Closed (15:30 IST). Shutting down.")
                     self._finalize_journal_day()
                     break
 
-                if self.portfolio["open_position"]:
+                # Priority order: straddle (T2) > single-leg (T1, regime) > scan.
+                # Both can never coexist (straddle blocks single-leg entry and
+                # vice versa via _scan_for_entries gating).
+                if self.portfolio.get("open_straddle"):
+                    self._monitor_straddle(now)
+                    time.sleep(3)
+                elif self.portfolio["open_position"]:
                     self._monitor_position(now)
                     time.sleep(3) # Turbo query loop: 1 hit per 3s = 0.33/sec (Safe via API)
                 else:
@@ -399,6 +415,12 @@ class LiveOrchestrator:
             "reasons": signal.get('reasons', []),
             "near_miss_count": len(signal.get('near_misses', [])),
         }
+
+        # T2: straddle signals are routed to a separate two-leg entry path
+        # so the existing single-leg position-management logic stays intact.
+        if signal.get('is_straddle'):
+            self._open_straddle_position(signal, now, spot)
+            return
 
         if signal['direction']:
             direction = signal['direction']
@@ -619,6 +641,197 @@ class LiveOrchestrator:
                 logger.warning(f"Journal on_exit failed: {e}")
 
         self.portfolio["open_position"] = None
+        self.save_portfolio()
+        return  # avoid falling into the next method
+
+    # ===================================================================
+    # T2 Straddle: parallel entry / monitor / close path.
+    # Lives in self.portfolio["open_straddle"] (separate slot from
+    # open_position so single-leg logic stays untouched).
+    # ===================================================================
+
+    def _open_straddle_position(self, signal: dict, now, spot: float) -> None:
+        """Place both legs of a straddle simultaneously (paper-mode only).
+        Reads ATM premiums fresh from the fetcher so the price reflects
+        the actual entry tick, not the dispatcher snapshot.
+        """
+        atm_strike = int(round(spot / self.strike_step) * self.strike_step)
+        leg1_dir = signal.get('direction', 'CE')
+        leg2_dir = signal.get('second_direction', 'PE')
+
+        leg1_premium = self.fetcher.get_option_ltp(atm_strike, leg1_dir)
+        leg2_premium = self.fetcher.get_option_ltp(atm_strike, leg2_dir)
+
+        if leg1_premium <= 0 or leg2_premium <= 0:
+            logger.info(
+                f"T2 signal received but premiums unavailable "
+                f"({leg1_dir}={leg1_premium}, {leg2_dir}={leg2_premium}). "
+                f"Skipping."
+            )
+            return
+
+        combined_entry = leg1_premium + leg2_premium
+        combined_sl_pct = float(signal.get('combined_sl_pct') or 0.50)
+        combined_tp_pct = signal.get('combined_tp_pct')   # may be None
+        time_stop_min = int(signal.get('tactic_time_stop_min', 35))
+
+        # Sizing: same Rs.20k/trade rule used by single-leg.
+        # Cost per "unit" = combined_premium x lot_size (1 lot CE + 1 lot PE).
+        cost_per_unit = combined_entry * self.lot_size
+        if cost_per_unit <= 0:
+            logger.warning("T2: cost_per_unit is zero, cannot size.")
+            return
+        capital_per_trade = 20_000.0   # matches T2 backtest sizing
+        lots = max(1, int(capital_per_trade // cost_per_unit))
+        qty_per_leg = lots * self.lot_size
+
+        # Daily entry counter shared with single-leg path
+        self._positions_today_count += 1
+
+        sl_combined_price = combined_entry * (1 - combined_sl_pct)
+        tp_combined_price = (combined_entry * (1 + combined_tp_pct)
+                             if combined_tp_pct else None)
+
+        self.portfolio["open_straddle"] = {
+            "entry_time": now.isoformat(),
+            "tactic_name": signal.get('tactic_name', 't2_expiry_straddle'),
+            "atm_strike": atm_strike,
+            "leg1_dir": leg1_dir,
+            "leg1_entry_price": leg1_premium,
+            "leg2_dir": leg2_dir,
+            "leg2_entry_price": leg2_premium,
+            "combined_entry": combined_entry,
+            "combined_sl_price": sl_combined_price,
+            "combined_tp_price": tp_combined_price,
+            "lots": lots,
+            "qty_per_leg": qty_per_leg,
+            "is_expiry_day": True,
+            "time_stop_min": time_stop_min,
+            "spot_at_entry": spot,
+        }
+        self.save_portfolio()
+
+        logger.info(
+            f"[T2 STRADDLE OPENED] strike={atm_strike} "
+            f"{leg1_dir}={leg1_premium:.2f} {leg2_dir}={leg2_premium:.2f} "
+            f"combined={combined_entry:.2f} lots={lots} (qty/leg={qty_per_leg}) "
+            f"SL={sl_combined_price:.2f} TP={tp_combined_price}"
+        )
+        if self.telegram is not None:
+            try:
+                self.telegram.send_message(
+                    f"[T2 STRADDLE OPENED]\n"
+                    f"Strike: {atm_strike}\n"
+                    f"CE+PE entry: Rs.{combined_entry:.2f}\n"
+                    f"Lots: {lots}, qty/leg: {qty_per_leg}\n"
+                    f"SL (combined): Rs.{sl_combined_price:.2f}"
+                )
+            except Exception:
+                pass
+
+    def _monitor_straddle(self, now) -> None:
+        """Tick combined-premium against SL/TP/time-stop. Force-close at
+        15:25 in any case (handled here so we don't need to wait for
+        MARKET_CLOSE at 15:30).
+        """
+        sd = self.portfolio.get("open_straddle")
+        if not sd:
+            return
+
+        # Force close at 15:25 regardless (T2 spec)
+        FORCE_CLOSE = dtime(15, 25)
+        if now.time() >= FORCE_CLOSE:
+            self._close_straddle("EOD Force Close (15:25)")
+            return
+
+        # Fetch live premiums for both legs
+        ce_dir = sd["leg1_dir"]; ce_strike = sd["atm_strike"]
+        pe_dir = sd["leg2_dir"]
+        leg1_now = self.fetcher.get_option_ltp(ce_strike, ce_dir)
+        leg2_now = self.fetcher.get_option_ltp(ce_strike, pe_dir)
+        if leg1_now <= 0 or leg2_now <= 0:
+            return  # stale tick, skip
+
+        combined_now = leg1_now + leg2_now
+
+        # Combined SL
+        if combined_now <= sd["combined_sl_price"]:
+            self._close_straddle(
+                f"Combined SL hit ({combined_now:.2f} <= {sd['combined_sl_price']:.2f})"
+            )
+            return
+        # Combined TP (if set)
+        if sd["combined_tp_price"] and combined_now >= sd["combined_tp_price"]:
+            self._close_straddle(
+                f"Combined TP hit ({combined_now:.2f} >= {sd['combined_tp_price']:.2f})"
+            )
+            return
+
+        # Time-stop
+        entry_t = datetime.fromisoformat(sd["entry_time"])
+        held_min = (now - entry_t).total_seconds() / 60
+        if held_min >= sd["time_stop_min"]:
+            self._close_straddle(f"Time-stop ({held_min:.0f}min)")
+            return
+
+    def _close_straddle(self, reason: str) -> None:
+        sd = self.portfolio.get("open_straddle")
+        if not sd:
+            return
+
+        ce_dir = sd["leg1_dir"]; pe_dir = sd["leg2_dir"]
+        strike = sd["atm_strike"]; qty = sd["qty_per_leg"]
+
+        leg1_exit = self.fetcher.get_option_ltp(strike, ce_dir)
+        leg2_exit = self.fetcher.get_option_ltp(strike, pe_dir)
+        if leg1_exit <= 0:
+            leg1_exit = sd["leg1_entry_price"]   # fallback to mark unknown
+        if leg2_exit <= 0:
+            leg2_exit = sd["leg2_entry_price"]
+
+        leg1_pnl = (leg1_exit - sd["leg1_entry_price"]) * qty
+        leg2_pnl = (leg2_exit - sd["leg2_entry_price"]) * qty
+        gross_pnl = leg1_pnl + leg2_pnl
+        # Brokerage: 2 legs round-trip = 4 orders. Match backtest: Rs.120 paper.
+        net_pnl = gross_pnl - 120.0
+        self.portfolio["capital"] += net_pnl
+
+        exit_time = datetime.now(IST)
+        # Append two trade_history entries (one per leg) for compatibility
+        # with the dashboard TradesTable + downstream P&L calc.
+        for leg_dir, leg_entry, leg_exit, leg_pnl in (
+            (ce_dir, sd["leg1_entry_price"], leg1_exit, leg1_pnl),
+            (pe_dir, sd["leg2_entry_price"], leg2_exit, leg2_pnl),
+        ):
+            self.portfolio["trade_history"].append({
+                "entry_time": sd["entry_time"],
+                "exit_time": exit_time.isoformat(),
+                "trade_type": f"BUY {leg_dir} (T2 leg)",
+                "strike": strike,
+                "entry_price": leg_entry,
+                "exit_price": leg_exit,
+                "pnl": leg_pnl - 60.0,   # half the brokerage allocated per leg
+                "reason": reason,
+            })
+
+        logger.info(
+            f"[T2 STRADDLE CLOSED] reason={reason} "
+            f"{ce_dir}: {sd['leg1_entry_price']:.2f}->{leg1_exit:.2f} "
+            f"{pe_dir}: {sd['leg2_entry_price']:.2f}->{leg2_exit:.2f} "
+            f"net_pnl=Rs.{net_pnl:.2f}"
+        )
+        if self.telegram is not None:
+            try:
+                tag = "[WIN]" if net_pnl > 0 else "[LOSS]"
+                self.telegram.send_message(
+                    f"{tag} T2 STRADDLE CLOSED\n"
+                    f"Reason: {reason}\n"
+                    f"Net P&L: Rs.{net_pnl:,.2f}"
+                )
+            except Exception:
+                pass
+
+        self.portfolio["open_straddle"] = None
         self.save_portfolio()
 
         # PR 2: consecutive-loss tracking + regime self-diagnostic.
