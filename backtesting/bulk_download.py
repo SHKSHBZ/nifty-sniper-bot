@@ -161,7 +161,7 @@ def _request_with_retry(
     *,
     params: Optional[dict] = None,
     timeout: int = 20,
-    max_retries: int = 4,
+    max_retries: int = 2,
 ) -> Optional[requests.Response]:
     for attempt in range(max_retries):
         try:
@@ -326,7 +326,7 @@ def run(
                  p.atm)
 
         contracts = fetch_contract_list(session, "NSE_INDEX|Nifty 50", p.expiry)
-        time.sleep(0.5)
+        time.sleep(1.0)
         if not contracts:
             continue
         weeks_with_expiry_found.add(monday)
@@ -365,7 +365,7 @@ def run(
             df = fetch_candles_for_contract(
                 session, c["instrument_key"], window_from, window_to,
             )
-            time.sleep(0.5)
+            time.sleep(1.0)
 
             if df is None or df.empty:
                 total_missing += 1
