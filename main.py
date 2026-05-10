@@ -670,6 +670,28 @@ class LiveOrchestrator:
             )
             return
 
+        # Defensive re-check: market may have moved between gate-pass (in
+        # the dispatcher) and now. Re-validate the per-leg premium band so
+        # a 1-2 tick drift doesn't push us into a trade we'd no longer take.
+        # Bounds match T2Config (5.0 / 20.0) — kept here as constants so
+        # this method is self-contained.
+        T2_MIN_PREM_PER_LEG = 5.0
+        T2_MAX_PREM_PER_LEG = 20.0
+        if not (T2_MIN_PREM_PER_LEG <= leg1_premium <= T2_MAX_PREM_PER_LEG):
+            logger.info(
+                f"T2 entry blocked: {leg1_dir} premium {leg1_premium:.2f} "
+                f"drifted out of band [{T2_MIN_PREM_PER_LEG}, {T2_MAX_PREM_PER_LEG}] "
+                f"between gate and entry."
+            )
+            return
+        if not (T2_MIN_PREM_PER_LEG <= leg2_premium <= T2_MAX_PREM_PER_LEG):
+            logger.info(
+                f"T2 entry blocked: {leg2_dir} premium {leg2_premium:.2f} "
+                f"drifted out of band [{T2_MIN_PREM_PER_LEG}, {T2_MAX_PREM_PER_LEG}] "
+                f"between gate and entry."
+            )
+            return
+
         combined_entry = leg1_premium + leg2_premium
         combined_sl_pct = float(signal.get('combined_sl_pct') or 0.50)
         combined_tp_pct = signal.get('combined_tp_pct')   # may be None
@@ -732,7 +754,8 @@ class LiveOrchestrator:
     def _monitor_straddle(self, now) -> None:
         """Tick combined-premium against SL/TP/time-stop. Force-close at
         15:25 in any case (handled here so we don't need to wait for
-        MARKET_CLOSE at 15:30).
+        MARKET_CLOSE at 15:30). Also caches last-good LTPs so close-time
+        feed glitches don't silently zero out P&L.
         """
         sd = self.portfolio.get("open_straddle")
         if not sd:
@@ -750,7 +773,14 @@ class LiveOrchestrator:
         leg1_now = self.fetcher.get_option_ltp(ce_strike, ce_dir)
         leg2_now = self.fetcher.get_option_ltp(ce_strike, pe_dir)
         if leg1_now <= 0 or leg2_now <= 0:
-            return  # stale tick, skip
+            return  # stale tick, skip — but DON'T overwrite last_good cache
+
+        # Cache last-good LTPs (used by _close_straddle if final-tick feed fails)
+        sd["leg1_last_good"] = leg1_now
+        sd["leg2_last_good"] = leg2_now
+        sd["last_good_ts"] = now.isoformat()
+        # Save through is cheap and keeps the cache durable across restarts.
+        self.save_portfolio()
 
         combined_now = leg1_now + leg2_now
 
@@ -784,10 +814,44 @@ class LiveOrchestrator:
 
         leg1_exit = self.fetcher.get_option_ltp(strike, ce_dir)
         leg2_exit = self.fetcher.get_option_ltp(strike, pe_dir)
+
+        # Fallback chain when fresh fetch returns 0/missing:
+        #   1. Use last-good LTP cached during _monitor_straddle ticks
+        #      (always valid in normal operation — monitor runs every 3s)
+        #   2. Last resort: use 1% of entry price as a conservative LOSS
+        #      estimate (NEVER use entry_price as fallback — that hides
+        #      losses on close-tick feed glitches).
+        # Always log loud when fallback fires so the trade gets reviewed.
         if leg1_exit <= 0:
-            leg1_exit = sd["leg1_entry_price"]   # fallback to mark unknown
+            cached = sd.get("leg1_last_good")
+            if cached and cached > 0:
+                logger.warning(
+                    f"[T2 CLOSE FALLBACK] {ce_dir} fresh LTP=0, using "
+                    f"last-good={cached:.2f} (cached at {sd.get('last_good_ts')})"
+                )
+                leg1_exit = float(cached)
+            else:
+                logger.error(
+                    f"[T2 CLOSE FALLBACK] {ce_dir} fresh LTP=0 AND no cache. "
+                    f"Marking as 1% of entry (worst-case LOSS estimate). "
+                    f"REVIEW THIS TRADE MANUALLY."
+                )
+                leg1_exit = sd["leg1_entry_price"] * 0.01
         if leg2_exit <= 0:
-            leg2_exit = sd["leg2_entry_price"]
+            cached = sd.get("leg2_last_good")
+            if cached and cached > 0:
+                logger.warning(
+                    f"[T2 CLOSE FALLBACK] {pe_dir} fresh LTP=0, using "
+                    f"last-good={cached:.2f} (cached at {sd.get('last_good_ts')})"
+                )
+                leg2_exit = float(cached)
+            else:
+                logger.error(
+                    f"[T2 CLOSE FALLBACK] {pe_dir} fresh LTP=0 AND no cache. "
+                    f"Marking as 1% of entry (worst-case LOSS estimate). "
+                    f"REVIEW THIS TRADE MANUALLY."
+                )
+                leg2_exit = sd["leg2_entry_price"] * 0.01
 
         leg1_pnl = (leg1_exit - sd["leg1_entry_price"]) * qty
         leg2_pnl = (leg2_exit - sd["leg2_entry_price"]) * qty
