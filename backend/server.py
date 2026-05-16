@@ -47,10 +47,15 @@ LOG_DIR = BASE_DIR / "logs"
 SESSION_FILE = BASE_DIR / "state" / "upstox_session.json"
 
 # --- Process Tracking ---
-# 4-bot view: legacy + regime mode for each index. The regime variants
-# point at *_regime files written by the bot when launched with the
-# regime config files.
-BOT_TYPES = ["NIFTY", "SENSEX", "NIFTY_REGIME", "SENSEX_REGIME", "NIFTY_T1", "NIFTY_T2"]
+# Consolidated 2-bot view (2026-05-17): regime-mode bots only. The dispatcher
+# in regime mode already runs all tactics (T1 / T2 / trend_pullback / vwap /
+# ORBs) — the previous T1/T2/legacy variants were running duplicate trades.
+# Legacy/T1/T2 variants kept as lab-only labels for backward compat with the
+# dashboard, but are not in the active set.
+ACTIVE_BOT_TYPES = ["NIFTY_REGIME", "SENSEX_REGIME", "NIFTY_SELLER"]
+# Lab-only labels still readable (so dashboard can show historical portfolios)
+LAB_BOT_TYPES = ["NIFTY", "SENSEX", "NIFTY_T1", "NIFTY_T2"]
+BOT_TYPES = ACTIVE_BOT_TYPES + LAB_BOT_TYPES
 tracked_pids = {b: None for b in BOT_TYPES}
 
 
@@ -60,12 +65,14 @@ def _suffix(bot_type: str) -> str:
     NIFTY_REGIME → 'NIFTY_regime'.
     NIFTY_T1     → 'NIFTY_t1'.
     NIFTY_T2     → 'NIFTY_t2'.
+    NIFTY_SELLER → 'NIFTY_seller'.
     """
     bt = bot_type.upper()
     if bt == "NIFTY_REGIME":  return "NIFTY_regime"
     if bt == "SENSEX_REGIME": return "SENSEX_regime"
     if bt == "NIFTY_T1":      return "NIFTY_t1"
     if bt == "NIFTY_T2":      return "NIFTY_t2"
+    if bt == "NIFTY_SELLER":  return "NIFTY_seller"
     return bt
 
 # --- Live indices cache (1s TTL) ---
@@ -115,7 +122,9 @@ def find_running_bots():
             is_regime = '_regime' in cmd_str
             is_t1     = 'config_t1' in cmd_str
             is_t2     = 'config_t2' in cmd_str
-            if is_t1:                   found["NIFTY_T1"] = proc.pid
+            is_seller = '_seller' in cmd_str
+            if is_seller:               found["NIFTY_SELLER"] = proc.pid
+            elif is_t1:                 found["NIFTY_T1"] = proc.pid
             elif is_t2:                 found["NIFTY_T2"] = proc.pid
             elif is_sensex and is_regime: found["SENSEX_REGIME"] = proc.pid
             elif is_sensex:             found["SENSEX"] = proc.pid
@@ -154,6 +163,16 @@ def start_bot(bot_type: str):
     bot_type = bot_type.upper()
     if bot_type not in BOT_TYPES:
         raise HTTPException(400, "Invalid bot type")
+    # Block lab-only configs from being launched. They duplicated the
+    # active regime bots' trades; retired 2026-05-17 to avoid 3x order
+    # flow through the single Upstox API on live deployment.
+    if bot_type in LAB_BOT_TYPES:
+        raise HTTPException(
+            403,
+            f"{bot_type} is a lab-only bot type (retired 2026-05-17). "
+            f"Use NIFTY_REGIME or SENSEX_REGIME — the regime dispatcher "
+            f"already runs the tactics this bot used to fire."
+        )
 
     # Check if already running
     discovered = find_running_bots()
@@ -168,17 +187,29 @@ def start_bot(bot_type: str):
         "SENSEX_REGIME": "config_sensex_regime.json",
         "NIFTY_T1":      "project_config_t1.json",
         "NIFTY_T2":      "project_config_t2.json",
+        "NIFTY_SELLER":  "project_config_seller.json",
     }
-    cmd = [sys.executable, str(BASE_DIR / "main.py"), config_map[bot_type]]
+    cmd = [sys.executable, "-u", str(BASE_DIR / "main.py"), config_map[bot_type]]
 
+    # Capture startup output so silent crashes (missing .env, bad creds,
+    # interactive input EOF, import errors) are visible. Each launch writes
+    # to its own file so the previous run's diagnostics aren't overwritten.
+    LOG_DIR.mkdir(exist_ok=True)
+    startup_log = LOG_DIR / f"startup_{_suffix(bot_type)}.log"
     try:
+        log_fh = open(startup_log, "w", encoding="utf-8", buffering=1)
         proc = subprocess.Popen(
             cmd, cwd=str(BASE_DIR),
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+            stdout=log_fh, stderr=subprocess.STDOUT,
             creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == 'nt' else 0
         )
         tracked_pids[bot_type] = proc.pid
-        return {"message": f"{bot_type} started", "pid": proc.pid}
+        return {
+            "message": f"{bot_type} started",
+            "pid": proc.pid,
+            "startup_log": str(startup_log),
+        }
     except Exception as e:
         raise HTTPException(500, str(e))
 

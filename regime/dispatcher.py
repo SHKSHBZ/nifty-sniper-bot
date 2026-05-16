@@ -298,6 +298,24 @@ class TacticDispatcher:
         # ---- Route ----
         decision = self.router.route(regime, open_direction=position_direction)
 
+        # Per-scan regime log — one line per dispatcher.evaluate so we can
+        # reconstruct "what regime did the classifier see every minute" from
+        # logs alone. Added 2026-05-17. Greppable prefix: [CLASSIFIER].
+        log.info(
+            "[CLASSIFIER] regime=%s tactic=%s dir=%s | spot=%.1f vwap=%.1f "
+            "vix=%.2f dte=%d gap=%.2f%% range_ratio=%.2f adx=%.1f",
+            regime.value if hasattr(regime, "value") else str(regime),
+            decision.tactic.value if hasattr(decision.tactic, "value") else str(decision.tactic),
+            decision.direction or "-",
+            float(feat.price or 0),
+            float(feat.vwap or 0),
+            float(feat.vix_level or 0),
+            int(feat.dte or 0),
+            float(feat.gap_pct or 0) * 100,
+            float(feat.range_ratio or 0),
+            float(feat.adx_15m or 0),
+        )
+
         # If the router demands force-exit on regime change, signal that
         # to the caller via a special direction marker (caller ignores
         # if no position open).

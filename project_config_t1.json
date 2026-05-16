@@ -2,6 +2,7 @@
     "project_name": "NiftySensex_Weekly_Options_Buyer_Bot",
     "version": "2.0.0-t1",
     "trading_index": "NIFTY",
+    "focus_zone_writer": false,
     "_t1_summary": "T1-only mode. Engine runs in 'regime' but T1 fires before regime routing each tick — at most once per day in [10:00, 10:30] when VIX gates pass. Other regime tactics still run when T1 stays silent (most of the day).",
     "environment": {
         "local_inference_url": "http://localhost:11434",

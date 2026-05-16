@@ -1,0 +1,64 @@
+{
+    "project_name": "NiftySensex_Weekly_Options_Seller_Bot",
+    "version": "1.0.0-seller-v1",
+    "trading_index": "NIFTY",
+    "focus_zone_writer": false,
+    "_seller_summary": "Seller bot v1 (2026-05-17). Sells Iron Condors on RANGE-classified days only. Defined-risk only — no naked sells. Force-close 15:15 IST. Paper mode only for first 2 weeks of observation.",
+    "environment": {
+        "broker_api": "Upstox-v2"
+    },
+    "engine_mode": "regime",
+    "seller_mode": true,
+    "_seller_mode_help": "When true, main.py runs the iron-condor entry/monitor/close loop instead of the buyer scan. Reuses the regime classifier via the dispatcher.",
+    "seller_strategy": {
+        "tactic": "iron_condor_v1",
+        "_strategy_help": "Iron Condor: SHORT OTM CE, LONG further-OTM CE, SHORT OTM PE, LONG further-OTM PE. Defined risk on both sides.",
+        "wing_width_pts": 100,
+        "short_strike_distance_pts": 200,
+        "_strikes_help": "On NIFTY (step 50): short legs are ATM +/- 200 pts (4 strikes OTM). Long legs are short +/- 100 pts (2 strikes further OTM). Tighten for low-IV days; widen for high-IV.",
+        "min_net_credit_per_lot": 15.0,
+        "_credit_help": "Reject the entry if combined premium collected < this. Ensures decent reward-to-risk.",
+        "profit_target_pct": 0.50,
+        "stop_loss_multiplier": 1.5,
+        "_exit_help": "Close at 50% of max profit (50% of net credit). Stop loss at 1.5x the credit received (e.g. Rs.30 credit -> SL at -Rs.45 combined). Force close 15:15 IST.",
+        "force_close_time": "15:15:00",
+        "no_entry_before": "10:30:00",
+        "no_entry_after": "13:30:00",
+        "_window_help": "Skip opening hour (volatile) and last 2 hours (theta decays too fast for fresh entries). Sweet spot 10:30-13:30."
+    },
+    "seller_entry_gates": {
+        "require_regime": "RANGE",
+        "_regime_help": "Only enter when classifier verdict is RANGE. CHOP also acceptable; TREND/EXPIRY skipped.",
+        "max_vix_for_entry": 999.0,
+        "_vix_gate_help": "VIX gate DISABLED for v1 (set to 999 = effectively off). 2026-05-17 sweep showed that no threshold ≥13 actually filters the worst loss day, and the conservative (≤12) setting throws out too many wins. Trading all days to capture maximum learning signal in paper mode. To re-enable: set this to 14 (moderate, 97% win rate) or 12 (conservative, 100% win rate in 213-day sample).",
+        "min_iv_percentile": 30,
+        "_iv_help": "Skip if ATM IV percentile (vs last 30 days) < threshold. Selling cheap premium = no edge. NOT YET IMPLEMENTED in v1 (needs 30 days of macro history first).",
+        "min_or_inside_minutes": 60,
+        "_or_help": "Spot must have stayed inside Opening Range for the last 60 min (range confirmation per playbook). NOT YET IMPLEMENTED in v1."
+    },
+    "risk": {
+        "max_daily_loss_inr": 5000,
+        "max_concurrent_positions": 1,
+        "max_lots_per_trade": 1,
+        "_risk_help": "v1 is intentionally conservative. One position at a time, one lot per position. Scale up after 2 weeks of clean paper results."
+    },
+    "strategy": {
+        "name": "iron_condor_seller_v1",
+        "nifty_strike_step": 50,
+        "sensex_strike_step": 100,
+        "nifty_lot_size": 65,
+        "sensex_lot_size": 20,
+        "time_gate": "10:30:00",
+        "eod_exit": "15:15:00"
+    },
+    "alerts": {
+        "telegram_enabled": true,
+        "log_full_reasoning": true
+    },
+    "journal_enabled": true,
+    "modes": {
+        "paper_trade": true,
+        "backtest": false,
+        "live": false
+    }
+}
