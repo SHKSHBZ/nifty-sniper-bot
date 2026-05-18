@@ -1,0 +1,67 @@
+{
+    "capital": 99366.0,
+    "open_position": null,
+    "trade_history": [
+        {
+            "entry_time": "2026-05-12T15:29:00.719423+05:30",
+            "exit_time": "2026-05-12T15:30:01.002365+05:30",
+            "trade_type": "BUY CE",
+            "strike": 74700,
+            "entry_price": 547.75,
+            "exit_price": 544.0,
+            "pnl": -135.0,
+            "reason": "Market Close (15:30 IST)"
+        },
+        {
+            "entry_time": "2026-05-13T10:00:00.928337+05:30",
+            "exit_time": "2026-05-13T10:05:14.423041+05:30",
+            "trade_type": "BUY CE",
+            "strike": 74500,
+            "entry_price": 481.6,
+            "exit_price": 530.35,
+            "pnl": 915.0,
+            "reason": "PCR SHIFT EXIT (CE: 1.11 -> 0.88, delta -0.23)"
+        },
+        {
+            "entry_time": "2026-05-13T11:55:00.436713+05:30",
+            "exit_time": "2026-05-13T12:04:59.165245+05:30",
+            "trade_type": "BUY CE",
+            "strike": 74800,
+            "entry_price": 450.8,
+            "exit_price": 479.25,
+            "pnl": 508.9999999999998,
+            "reason": "PCR SHIFT EXIT (CE: 1.11 -> 0.77, delta -0.34)"
+        },
+        {
+            "entry_time": "2026-05-14T14:34:00.848158+05:30",
+            "exit_time": "2026-05-14T14:35:00.453138+05:30",
+            "trade_type": "BUY CE",
+            "strike": 75600,
+            "entry_price": 136.25,
+            "exit_price": 100.15,
+            "pnl": -781.9999999999999,
+            "reason": "HARD STOP LOSS"
+        },
+        {
+            "entry_time": "2026-05-14T14:35:03.464126+05:30",
+            "exit_time": "2026-05-14T14:36:06.983839+05:30",
+            "trade_type": "BUY CE",
+            "strike": 75600,
+            "entry_price": 99.95,
+            "exit_price": 79.45,
+            "pnl": -470.0,
+            "reason": "HARD STOP LOSS"
+        },
+        {
+            "entry_time": "2026-05-14T14:36:09.998509+05:30",
+            "exit_time": "2026-05-14T14:37:00.798456+05:30",
+            "trade_type": "BUY CE",
+            "strike": 75600,
+            "entry_price": 88.5,
+            "exit_price": 57.95,
+            "pnl": -671.0,
+            "reason": "HARD STOP LOSS"
+        }
+    ],
+    "open_straddle": null
+}

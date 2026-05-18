@@ -1,0 +1,67 @@
+{
+    "capital": 123621.75,
+    "open_position": null,
+    "trade_history": [
+        {
+            "entry_time": "2026-05-12T14:53:00.240496+05:30",
+            "exit_time": "2026-05-12T15:25:00.923651+05:30",
+            "trade_type": "BUY CE (T2 leg)",
+            "strike": 23450,
+            "entry_price": 14.4,
+            "exit_price": 0.1,
+            "pnl": -8425.5,
+            "reason": "EOD Force Close (15:25)"
+        },
+        {
+            "entry_time": "2026-05-12T14:53:00.240496+05:30",
+            "exit_time": "2026-05-12T15:25:00.923651+05:30",
+            "trade_type": "BUY PE (T2 leg)",
+            "strike": 23450,
+            "entry_price": 17.15,
+            "exit_price": 72.7,
+            "pnl": 32436.750000000004,
+            "reason": "EOD Force Close (15:25)"
+        },
+        {
+            "entry_time": "2026-05-13T10:02:00.227095+05:30",
+            "exit_time": "2026-05-13T10:18:05.933028+05:30",
+            "trade_type": "BUY CE",
+            "strike": 23400,
+            "entry_price": 250.15,
+            "exit_price": 275.7,
+            "pnl": 1600.7499999999989,
+            "reason": "PCR SHIFT EXIT (CE: 1.17 -> 1.06, delta -0.11)"
+        },
+        {
+            "entry_time": "2026-05-13T10:18:08.943827+05:30",
+            "exit_time": "2026-05-13T10:28:14.011813+05:30",
+            "trade_type": "BUY CE",
+            "strike": 23450,
+            "entry_price": 248.4,
+            "exit_price": 265.95,
+            "pnl": 1080.7499999999989,
+            "reason": "PCR SHIFT EXIT (CE: 1.06 -> 0.93, delta -0.12)"
+        },
+        {
+            "entry_time": "2026-05-13T10:30:00.338166+05:30",
+            "exit_time": "2026-05-13T11:01:02.283322+05:30",
+            "trade_type": "BUY CE",
+            "strike": 23450,
+            "entry_price": 262.4,
+            "exit_price": 223.95,
+            "pnl": -2559.249999999999,
+            "reason": "TIME STOP (30m at -14.65% - no edge realised)"
+        },
+        {
+            "entry_time": "2026-05-15T10:06:00.457785+05:30",
+            "exit_time": "2026-05-15T10:17:49.188094+05:30",
+            "trade_type": "BUY CE",
+            "strike": 23800,
+            "entry_price": 172.4,
+            "exit_price": 165.45,
+            "pnl": -511.75000000000114,
+            "reason": "ADVERSE OI EXIT (CE OI grew +11.0% - call writers stacking) spot 23802->23797"
+        }
+    ],
+    "open_straddle": null
+}

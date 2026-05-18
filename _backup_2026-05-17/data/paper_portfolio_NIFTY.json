@@ -1,0 +1,37 @@
+{
+    "capital": 100213.25,
+    "open_position": null,
+    "trade_history": [
+        {
+            "entry_time": "2026-05-13T10:02:00.040668+05:30",
+            "exit_time": "2026-05-13T10:18:04.872750+05:30",
+            "trade_type": "BUY CE",
+            "strike": 23400,
+            "entry_price": 253.1,
+            "exit_price": 277.6,
+            "pnl": 1532.5000000000018,
+            "reason": "PCR SHIFT EXIT (CE: 1.17 -> 1.06, delta -0.11)"
+        },
+        {
+            "entry_time": "2026-05-13T10:18:07.887602+05:30",
+            "exit_time": "2026-05-13T10:28:10.869711+05:30",
+            "trade_type": "BUY CE",
+            "strike": 23450,
+            "entry_price": 247.4,
+            "exit_price": 268.05,
+            "pnl": 1282.2500000000005,
+            "reason": "PCR SHIFT EXIT (CE: 1.06 -> 0.93, delta -0.12)"
+        },
+        {
+            "entry_time": "2026-05-13T10:30:00.368851+05:30",
+            "exit_time": "2026-05-13T11:01:01.449423+05:30",
+            "trade_type": "BUY CE",
+            "strike": 23450,
+            "entry_price": 263.45,
+            "exit_price": 224.35,
+            "pnl": -2601.4999999999995,
+            "reason": "TIME STOP (30m at -14.84% - no edge realised)"
+        }
+    ],
+    "open_straddle": null
+}
