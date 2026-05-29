@@ -35,10 +35,10 @@ DTE_EXTREME        = PARAMS.get("dteThresholdExtreme", 3)
 DTE_HIGH           = PARAMS.get("dteThresholdHigh", 7)
 
 # Proximity: how close spot must be to S/R wall (as decimal fraction)
-PROXIMITY_PCT = PARAMS.get("wallProximityTolerancePercent", 0.15) / 100.0
+PROXIMITY_PCT = PARAMS.get("wallProximityTolerancePercent", 0.25) / 100.0
 
 # Sustain parameters
-SUSTAIN_TICKS = 3       # Number of consecutive 5m candle closes required in zone
+SUSTAIN_TICKS = 1       # Reduced from 3 to 1 to catch fast touches on trend days
 SUSTAIN_INTERVAL = 5    # Minutes between each candle close check
 
 # Focus Zone PCR thresholds
@@ -50,11 +50,11 @@ FOCUS_PCR_BEARISH_THRESHOLD = 0.85   # PCR below this = bearish (heavy Call writ
 # Above the upper bound  = move is over-extended; entering now = chasing
 #                          → block (most reversals happen at PCR extremes).
 # Inside the band        = early-enough confirmation → fire.
-FOCUS_PCR_CE_ENTRY_LOW  = 1.00   # need at least this much bullish lean for CE
-FOCUS_PCR_CE_ENTRY_HIGH = 1.30   # above this = too extended; fade-risk
+FOCUS_PCR_CE_ENTRY_LOW  = 0.85   # Widened from 1.00
+FOCUS_PCR_CE_ENTRY_HIGH = 1.60   # Widened from 1.30
 
-FOCUS_PCR_PE_ENTRY_LOW  = 0.50   # below this = extreme; fade-risk
-FOCUS_PCR_PE_ENTRY_HIGH = 0.95   # need at least this much bearish lean for PE
+FOCUS_PCR_PE_ENTRY_LOW  = 0.40   # Widened from 0.50
+FOCUS_PCR_PE_ENTRY_HIGH = 1.15   # Widened from 0.95
 
 # Gate 2 vigilance sub-gates — added 2026-05-09 after analysing 2026-05-08
 # loss day. Bot took CE at PCR=1.05 while PCR was collapsing (1.15→0.85)
@@ -73,7 +73,7 @@ VWAP_FILTER_ENABLED  = bool(PARAMS.get("vwapFilterEnabled", True))
 # spot, skip directional entries (no edge in tight chop).
 CHOP_DETECTOR_ENABLED  = bool(PARAMS.get("chopDetectorEnabled", True))
 CHOP_RANGE_LOOKBACK_MIN = int(PARAMS.get("chopRangeLookbackMinutes", 60))
-CHOP_RANGE_MAX_PCT      = float(PARAMS.get("chopRangeMaxPct", 0.005))  # 0.5%
+CHOP_RANGE_MAX_PCT      = float(PARAMS.get("chopRangeMaxPct", 0.003))  # Reduced to 0.3%
 
 # ---------------------------------------------------------------------------
 # Gate 1: Spot Sustain Check
@@ -336,14 +336,18 @@ class SignalEngine:
                  spot_history, india_vix=15.0, expiry_date=None, current_date=None, scalp_mode=False,
                  now=None):
         """
-        Three-Gate entry evaluation:
+        Simplified Two-Gate entry evaluation (refactored 2026-05-26):
 
-        Gate 0: India VIX Macro Trend - Restricts contrarian entries based on volatility.
-        Gate 1: Proximity + Sustain — Price must be near a wall AND sustained 3x 5m candles.
-        Gate 2: Focus Zone PCR — Localized PCR must confirm directional bias.
-        Gate 3: OI Build-Up — Option writers must be actively defending the wall.
+        Gate 0: VIX Macro + VWAP — blocks contrarian entries.
+        Gate 1: Proximity + Sustain — Price near S/R wall for 3x 5m candles.
+        Gate 2: Focus PCR — single OI check for directional conviction.
+                CE: PCR in [1.00, 1.30] → bullish
+                PE: PCR in [0.50, 0.95] → bearish
 
-        All gates must PASS for a signal to fire.
+        Old gates 2a (PCR slope), 2b (OI delta ratio), and 3 (OI build-up
+        confirmation) were removed. They added latency without enough
+        marginal signal — by the time all four OI gates passed, the entry
+        premium had already moved against us.
         """
         direction = None
         reasons = []
@@ -359,18 +363,46 @@ class SignalEngine:
         # cycles evaluating proximity / sustain in obvious no-trade conditions.
 
         # Range/chop detector — if 60-min spot range is too tight, skip.
+        # OI-AWARE OVERRIDE (added 2026-05-26): When OI conviction is strong
+        # (PE writers >> CE writers = bullish, or inverse), we override the
+        # price-based chop filter. OI positioning is a leading indicator
+        # that can anticipate a breakout before range expansion confirms it.
         if CHOP_DETECTOR_ENABLED:
             range_pct = self._compute_range_pct(spot_history, CHOP_RANGE_LOOKBACK_MIN)
             if range_pct is not None and range_pct < CHOP_RANGE_MAX_PCT:
-                reasons.append(
-                    f"❌ CHOP FILTER: 60m range {range_pct*100:.2f}% < "
-                    f"{CHOP_RANGE_MAX_PCT*100:.2f}% — no directional edge."
-                )
-                return {
-                    "direction": None, "reasons": reasons,
-                    "dte_risk": "MODERATE", "dte_days": 99,
-                    "is_expiry_day": False, "score": 0,
-                }
+                # ── OI conviction override ──────────────────────────────
+                oi_bypass = False
+                oi_bypass_dir = None
+                try:
+                    if isinstance(oi_pattern, dict):
+                        ce_chg = abs(float(oi_pattern.get("ce_oi_change", 0) or 0))
+                        pe_chg = abs(float(oi_pattern.get("pe_oi_change", 0) or 0))
+                        if ce_chg > 0 and pe_chg > 0:
+                            ratio = pe_chg / ce_chg
+                            if ratio >= 1.30:
+                                oi_bypass = True
+                                oi_bypass_dir = "CE (PE writers dominant)"
+                            elif ratio <= 0.70:
+                                oi_bypass = True
+                                oi_bypass_dir = "PE (CE writers dominant)"
+                except Exception:
+                    pass
+
+                if oi_bypass:
+                    reasons.append(
+                        f"⚠️ CHOP FILTER BYPASSED: 60m range {range_pct*100:.2f}% < "
+                        f"{CHOP_RANGE_MAX_PCT*100:.2f}% but OI conviction overrides → {oi_bypass_dir}"
+                    )
+                else:
+                    reasons.append(
+                        f"❌ CHOP FILTER: 60m range {range_pct*100:.2f}% < "
+                        f"{CHOP_RANGE_MAX_PCT*100:.2f}% — no directional edge."
+                    )
+                    return {
+                        "direction": None, "reasons": reasons,
+                        "dte_risk": "MODERATE", "dte_days": 99,
+                        "is_expiry_day": False, "score": 0,
+                    }
 
         # VWAP filter — block CE below VWAP, PE above VWAP. We compute the
         # candidate direction from proximity below; for now stash the VWAP
@@ -422,32 +454,17 @@ class SignalEngine:
                     if vwap is not None:
                         reasons.append(f"✅ VWAP OK: spot {spot_close:.0f} ≥ VWAP {vwap:.0f}")
 
-                    # --- GATE 2: PCR must lie inside the CE entry band ---
-                    if FOCUS_PCR_CE_ENTRY_LOW <= focus_pcr <= FOCUS_PCR_CE_ENTRY_HIGH:
+                    # --- GATE 2: Focus PCR direction check (SIMPLIFIED 2026-05-26) ---
+                    # PCR >= 1.00 → bullish OI conviction. We trust this single
+                    # OI signal rather than layering slope/delta/build-up gates
+                    # that delay entry and inflate premium. The S/R zone framework
+                    # manages the trade once we're in.
+                    if focus_pcr >= FOCUS_PCR_CE_ENTRY_LOW and focus_pcr <= FOCUS_PCR_CE_ENTRY_HIGH:
+                        direction = "CE"
                         reasons.append(
-                            f"✅ GATE 2 PASS: Focus PCR={focus_pcr:.2f} inside CE band "
-                            f"[{FOCUS_PCR_CE_ENTRY_LOW:.2f}-{FOCUS_PCR_CE_ENTRY_HIGH:.2f}]."
+                            f"✅ GATE 2 PASS: Focus PCR={focus_pcr:.2f} in CE band "
+                            f"[{FOCUS_PCR_CE_ENTRY_LOW:.2f}-{FOCUS_PCR_CE_ENTRY_HIGH:.2f}] → BULLISH."
                         )
-
-                        # Gate 2a: PCR slope (trend, not just snapshot)
-                        slope_ok, slope_reason = self._check_pcr_slope(now, focus_pcr, "CE")
-                        if not slope_ok:
-                            reasons.append(f"❌ GATE 2a FAIL: {slope_reason}")
-                        else:
-                            reasons.append(f"✅ GATE 2a PASS: {slope_reason}")
-                            # Gate 2b: OI delta ratio (who's writing faster)
-                            oi_delta_ok, oi_delta_reason = self._check_oi_delta_ratio(now, oi_pattern, "CE")
-                            if not oi_delta_ok:
-                                reasons.append(f"❌ GATE 2b FAIL: {oi_delta_reason}")
-                            else:
-                                reasons.append(f"✅ GATE 2b PASS: {oi_delta_reason}")
-                                # --- GATE 3: OI Build-Up Confirmation ---
-                                oi_confirmed, oi_reason = check_oi_confirmation(oi_pattern, "CE")
-                                if oi_confirmed:
-                                    direction = "CE"
-                                    reasons.append(f"✅ GATE 3 PASS: {oi_reason}")
-                                else:
-                                    reasons.append(f"❌ GATE 3 FAIL: {oi_reason}")
                     elif focus_pcr < FOCUS_PCR_CE_ENTRY_LOW:
                         reasons.append(
                             f"❌ GATE 2 FAIL: Focus PCR={focus_pcr:.2f} below "
@@ -494,32 +511,15 @@ class SignalEngine:
                     if vwap is not None:
                         reasons.append(f"✅ VWAP OK: spot {spot_close:.0f} ≤ VWAP {vwap:.0f}")
 
-                    # --- GATE 2: PCR must lie inside the PE entry band ---
+                    # --- GATE 2: Focus PCR direction check (SIMPLIFIED 2026-05-26) ---
+                    # PCR <= 0.95 → bearish OI conviction. Single OI signal
+                    # replaces the old layered slope/delta/build-up gates.
                     if FOCUS_PCR_PE_ENTRY_LOW <= focus_pcr <= FOCUS_PCR_PE_ENTRY_HIGH:
+                        direction = "PE"
                         reasons.append(
-                            f"✅ GATE 2 PASS: Focus PCR={focus_pcr:.2f} inside PE band "
-                            f"[{FOCUS_PCR_PE_ENTRY_LOW:.2f}-{FOCUS_PCR_PE_ENTRY_HIGH:.2f}]."
+                            f"✅ GATE 2 PASS: Focus PCR={focus_pcr:.2f} in PE band "
+                            f"[{FOCUS_PCR_PE_ENTRY_LOW:.2f}-{FOCUS_PCR_PE_ENTRY_HIGH:.2f}] → BEARISH."
                         )
-
-                        # Gate 2a: PCR slope (trend, not just snapshot)
-                        slope_ok, slope_reason = self._check_pcr_slope(now, focus_pcr, "PE")
-                        if not slope_ok:
-                            reasons.append(f"❌ GATE 2a FAIL: {slope_reason}")
-                        else:
-                            reasons.append(f"✅ GATE 2a PASS: {slope_reason}")
-                            # Gate 2b: OI delta ratio (who's writing faster)
-                            oi_delta_ok, oi_delta_reason = self._check_oi_delta_ratio(now, oi_pattern, "PE")
-                            if not oi_delta_ok:
-                                reasons.append(f"❌ GATE 2b FAIL: {oi_delta_reason}")
-                            else:
-                                reasons.append(f"✅ GATE 2b PASS: {oi_delta_reason}")
-                                # --- GATE 3: OI Build-Up Confirmation ---
-                                oi_confirmed, oi_reason = check_oi_confirmation(oi_pattern, "PE")
-                                if oi_confirmed:
-                                    direction = "PE"
-                                    reasons.append(f"✅ GATE 3 PASS: {oi_reason}")
-                                else:
-                                    reasons.append(f"❌ GATE 3 FAIL: {oi_reason}")
                     elif focus_pcr > FOCUS_PCR_PE_ENTRY_HIGH:
                         reasons.append(
                             f"❌ GATE 2 FAIL: Focus PCR={focus_pcr:.2f} above "

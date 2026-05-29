@@ -14,7 +14,7 @@ IST = pytz.timezone('Asia/Kolkata')
 
 MARKET_OPEN = dtime(9, 15)
 MARKET_CLOSE = dtime(15, 30)
-ENTRY_WINDOW_OPEN = dtime(10, 0)
+ENTRY_WINDOW_OPEN = dtime(10, 5)
 
 
 def next_market_open(now_ist: datetime):

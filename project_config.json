@@ -2,7 +2,7 @@
     "project_name": "NiftySensex_Weekly_Options_Buyer_Bot",
     "version": "2.0.0",
     "trading_index": "NIFTY",
-    "focus_zone_writer": false,
+    "focus_zone_writer": true,
     "environment": {
         "local_inference_url": "http://localhost:11434",
         "local_model": "qwen3:32b-coder",

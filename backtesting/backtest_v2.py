@@ -120,7 +120,7 @@ def run_backtest():
     BROKERAGE       = 30.0
     SLIPPAGE_PCT    = 0.015
     ATR_THRESHOLD   = 5.0
-    TIME_GATE       = "10:00:00"
+    TIME_GATE       = "10:05:00"
 
     print("=" * 70)
     print("  PURE OPTIONS BUYER BACKTEST - Option Chain AI")

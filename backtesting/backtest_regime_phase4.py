@@ -38,32 +38,41 @@ sys.path.insert(0, str(ROOT))
 from regime.classifier import (  # noqa: E402
     RegimeClassifier,
     ClassifierConfig,
+    ClassifierFeatures,
     Regime,
 )
 from signal_engine import SignalEngine  # noqa: E402
 from backtesting.backtest_regime_phase1 import (  # noqa: E402
-    load_spot, load_vix, resample, previous_day_close, build_feature_for_bar,
+    load_spot, load_vix, resample,
 )
 from backtesting.backtest_regime_phase3 import (  # noqa: E402
-    OPT_FILENAME_RE, MONTH_CODE,
-    discover_expiries, load_chain_for_expiry, map_day_to_expiry,
     Trade, _regime_breakdown, _monthly_breakdown,
 )
 
 
 # -------------------------------- Config -------------------------------------
 
+# Read tunable parameters from Options.json so backtest reflects live config
+import json as _json
+from pathlib import Path as _Path
+try:
+    _opts = _json.loads((_Path(__file__).resolve().parent.parent / "Options.json").read_text())
+    _cp = _opts.get("configurableParameters", {})
+except Exception:
+    _cp = {}
+
 # Production tactic exits (matching live bot's defaults)
-SL_PCT_NORMAL = 0.30
-TP_PCT_NORMAL = 0.50
-SL_PCT_EXPIRY = 0.20
-TP_PCT_EXPIRY = 0.35
-TIME_STOP_NORMAL_MIN = 120
-TIME_STOP_EXPIRY_MIN = 45
-ENTRY_AFTER = time(10, 0)
+SL_PCT_NORMAL = float(_cp.get("normalDayStopLossPercent", 30)) / 100.0
+TP_PCT_NORMAL = float(_cp.get("normalDayTargetPercent", 50)) / 100.0
+SL_PCT_EXPIRY = float(_cp.get("expiryDayStopLossPercent", 20)) / 100.0
+TP_PCT_EXPIRY = float(_cp.get("expiryDayTargetPercent", 35)) / 100.0
+TIME_STOP_NORMAL_MIN = int(_cp.get("thetaShieldNormalMins", 120))
+TIME_STOP_EXPIRY_MIN = int(_cp.get("thetaShieldExpiryMins", 45))
+ENTRY_AFTER = time(10, 5)       # aligned with market_hours.py ENTRY_WINDOW_OPEN change
 ENTRY_CUTOFF = time(14, 0)
 FORCE_FLAT = time(14, 30)
 SLIPPAGE = 0.015
+FOCUS_ZONE_HALF = 3             # ±3 strikes for focus PCR (can be overridden)
 BROKERAGE_PER_LEG = 30.0
 LOT_SIZE = 75
 STRIKE_STEP = 50
@@ -71,66 +80,97 @@ MIN_ENTRY_PREMIUM = 20.0
 SPOT_HISTORY_MIN = 15      # last 15 1-min readings for sustain check
 
 
-# ------------------------- Chain reconstruction ------------------------------
+# ------------------------- Daily chain state builder -------------------------
 
-def reconstruct_chain_state(
-    chain: dict[tuple[int, str], pd.DataFrame],
-    chain_5m_ago: dict[tuple[int, str], pd.DataFrame],
+_DAILY_CHAIN_CACHE: dict[date, Optional[pd.DataFrame]] = {}
+
+def load_daily_chain(day: date) -> Optional[pd.DataFrame]:
+    """Load the pre-merged daily option chain file for a trading day (cached)."""
+    if day in _DAILY_CHAIN_CACHE:
+        return _DAILY_CHAIN_CACHE[day]
+    path = ROOT / "data" / "daily_chain" / f"daily_chain_NIFTY_{day.isoformat()}.csv"
+    if not path.exists():
+        _DAILY_CHAIN_CACHE[day] = None
+        return None
+    df = pd.read_csv(path)
+    df["timestamp"] = pd.to_datetime(df["timestamp"])
+    _DAILY_CHAIN_CACHE[day] = df
+    return df
+
+
+def get_chain_state_at(
+    daily: pd.DataFrame,
     ts: pd.Timestamp,
     spot: float,
 ) -> dict:
     """
-    Returns {'support', 'resistance', 'focus_pcr', 'oi_pattern'}
-    for the given minute, computed exactly like data_fetcher.py:
-      - S/R: cluster-based 3-strike bands within ATM +/- 5
-      - focus_pcr: ATM +/- 3 strikes only
-      - oi_pattern: focus-zone OI change vs ts - 5min
+    Reconstruct support/resistance/focus_pcr/oi_pattern from daily chain,
+    matching the EXACT logic of the original reconstruct_chain_state().
+
+    Key difference from previous version: uses a 2-minute fallback window
+    for OI lookups (matching old per-expiry behavior), so missing timestamps
+    don't collapse signals.
     """
-    strikes = sorted({k[0] for k in chain.keys()})
-    if not strikes:
+    def _oi(strike: int, side: str, df: pd.DataFrame, t: pd.Timestamp) -> float:
+        """Lookup OI at a strike/side/timestamp with 2-min fallback."""
+        col = f"{side.lower()}_oi"
+        row = df[(df["strike"] == strike) & (df["timestamp"] == t)]
+        if not row.empty:
+            return float(row.iloc[0][col])
+        # 2-min fallback window (matching old reconstruct_chain_state)
+        window = df[(df["strike"] == strike) &
+                    (df["timestamp"] >= t - pd.Timedelta(minutes=2)) &
+                    (df["timestamp"] <= t)]
+        if window.empty:
+            return 0.0
+        return float(window.iloc[-1][col])
+
+    def _ltp(strike: int, side: str, df: pd.DataFrame, t: pd.Timestamp) -> Optional[float]:
+        """Lookup LTP at a strike/side/timestamp with 2-min fallback."""
+        col = f"{side.lower()}_ltp"
+        row = df[(df["strike"] == strike) & (df["timestamp"] == t)]
+        if not row.empty:
+            return float(row.iloc[0][col])
+        window = df[(df["strike"] == strike) &
+                    (df["timestamp"] >= t - pd.Timedelta(minutes=2)) &
+                    (df["timestamp"] <= t)]
+        if window.empty:
+            return None
+        return float(window.iloc[-1][col])
+
+    strikes = sorted(daily["strike"].unique())
+    if not len(strikes):
         return {"support": 0, "resistance": 0, "focus_pcr": 1.0,
                 "oi_pattern": {"ce_oi_change": 0, "pe_oi_change": 0}}
 
     atm = min(strikes, key=lambda x: abs(x - spot))
 
-    def oi_at(k: int, side: str, source: dict) -> float:
-        df = source.get((k, side))
-        if df is None:
-            return 0.0
-        try:
-            row = df.loc[ts]
-        except KeyError:
-            window = df.loc[ts - pd.Timedelta(minutes=2):ts]
-            if window.empty:
-                return 0.0
-            row = window.iloc[-1]
-        if isinstance(row, pd.DataFrame):
-            row = row.iloc[0]
-        return float(row.get("open_interest", 0))
-
-    # ---- Cluster-based S/R within ATM +/- 5 ----
-    res_strike, sup_strike = atm, atm
-    max_ce_cluster, max_pe_cluster = 0.0, 0.0
+    # ---- Cluster-based S/R within ATM +/- 5 (3-strike bands) ----
+    res_strike = sup_strike = atm
+    max_ce_cluster = max_pe_cluster = 0.0
     for s in [atm + (i * STRIKE_STEP) for i in range(-5, 6)]:
-        band_ce = (oi_at(s, "CE", chain)
-                   + oi_at(s + STRIKE_STEP, "CE", chain)
-                   + oi_at(s - STRIKE_STEP, "CE", chain))
-        band_pe = (oi_at(s, "PE", chain)
-                   + oi_at(s + STRIKE_STEP, "PE", chain)
-                   + oi_at(s - STRIKE_STEP, "PE", chain))
+        band_ce = (_oi(s, "CE", daily, ts)
+                   + _oi(s + STRIKE_STEP, "CE", daily, ts)
+                   + _oi(s - STRIKE_STEP, "CE", daily, ts))
+        band_pe = (_oi(s, "PE", daily, ts)
+                   + _oi(s + STRIKE_STEP, "PE", daily, ts)
+                   + _oi(s - STRIKE_STEP, "PE", daily, ts))
         if s >= atm and band_ce > max_ce_cluster:
-            max_ce_cluster, res_strike = band_ce, s
+            max_ce_cluster = band_ce
+            res_strike = s
         if s <= atm and band_pe > max_pe_cluster:
-            max_pe_cluster, sup_strike = band_pe, s
+            max_pe_cluster = band_pe
+            sup_strike = s
 
-    # ---- Focus-zone PCR + OI changes (ATM +/- 3) ----
-    total_ce_oi, total_pe_oi = 0.0, 0.0
-    ce_change, pe_change = 0.0, 0.0
-    for s in [atm + (i * STRIKE_STEP) for i in range(-3, 4)]:
-        ce_now = oi_at(s, "CE", chain)
-        pe_now = oi_at(s, "PE", chain)
-        ce_prev = oi_at(s, "CE", chain_5m_ago)
-        pe_prev = oi_at(s, "PE", chain_5m_ago)
+    # ---- Focus-zone PCR + OI changes (ATM +/- FOCUS_ZONE_HALF) ----
+    total_ce_oi = total_pe_oi = 0.0
+    ce_change = pe_change = 0.0
+    ts_prev = ts - pd.Timedelta(minutes=5)
+    for s in [atm + (i * STRIKE_STEP) for i in range(-FOCUS_ZONE_HALF, FOCUS_ZONE_HALF + 1)]:
+        ce_now = _oi(s, "CE", daily, ts)
+        pe_now = _oi(s, "PE", daily, ts)
+        ce_prev = _oi(s, "CE", daily, ts_prev)
+        pe_prev = _oi(s, "PE", daily, ts_prev)
         total_ce_oi += ce_now
         total_pe_oi += pe_now
         ce_change += (ce_now - ce_prev)
@@ -142,46 +182,49 @@ def reconstruct_chain_state(
         "support": int(sup_strike),
         "resistance": int(res_strike),
         "focus_pcr": focus_pcr,
-        "oi_pattern": {"ce_oi_change": ce_change, "pe_oi_change": pe_change},
+        "oi_pattern": {
+            "ce_oi_change": int(ce_change),
+            "pe_oi_change": int(pe_change),
+        },
     }
 
 
-# ------------------------- Spot history builder ------------------------------
-
-def build_spot_history(
-    spot_1m: pd.DataFrame,
-    ts: pd.Timestamp,
-    minutes: int = SPOT_HISTORY_MIN,
-) -> list[dict]:
-    """Return last `minutes` of 1-min readings as list of {'time', 'spot'}."""
-    end = ts
-    start = ts - pd.Timedelta(minutes=minutes)
-    window = spot_1m.loc[start:end]
-    return [{"time": idx.to_pydatetime(), "spot": float(row["close"])}
-            for idx, row in window.iterrows()]
+# Backward-compat aliases for other scripts that import from phase4
+def reconstruct_chain_state(chain, chain_5m_ago, ts, spot):
+    """Legacy signature — delegates to get_chain_state_at using chain as daily df."""
+    return get_chain_state_at(chain, ts, spot)
 
 
-# ----------------------------- Option price lookup ---------------------------
+def build_spot_history(spot_1m, ts, minutes=15):
+    """Replicates old helper — builds list of {time, spot} dicts."""
+    window = spot_1m.loc[ts - pd.Timedelta(minutes=minutes):ts]
+    return [
+        {"time": idx.to_pydatetime(), "spot": float(r["close"])}
+        for idx, r in window.iterrows()
+    ]
 
-def get_option_price_at(
-    chain: dict[tuple[int, str], pd.DataFrame],
+
+def get_option_premium_at(
+    daily: pd.DataFrame,
     strike: int,
     side: str,
     ts: pd.Timestamp,
-) -> Optional[tuple[float, float, float]]:
-    df = chain.get((strike, side))
-    if df is None:
+) -> Optional[float]:
+    """Get option premium (close price) for a strike at or before ts.
+    
+    Uses 2-minute fallback window to match old per-expiry behavior.
+    """
+    col = f"{side.lower()}_ltp"
+    row = daily[(daily["strike"] == strike) & (daily["timestamp"] == ts)]
+    if not row.empty:
+        return float(row.iloc[0][col])
+    # 2-min fallback
+    window = daily[(daily["strike"] == strike) &
+                   (daily["timestamp"] >= ts - pd.Timedelta(minutes=2)) &
+                   (daily["timestamp"] <= ts)]
+    if window.empty:
         return None
-    try:
-        row = df.loc[ts]
-    except KeyError:
-        window = df.loc[ts - pd.Timedelta(minutes=5):ts]
-        if window.empty:
-            return None
-        row = window.iloc[-1]
-    if isinstance(row, pd.DataFrame):
-        row = row.iloc[0]
-    return float(row["close"]), float(row["high"]), float(row["low"])
+    return float(window.iloc[-1][col])
 
 
 # ------------------------------- Simulator -----------------------------------
@@ -189,7 +232,7 @@ def get_option_price_at(
 def simulate_one_pass(
     spot_1m: pd.DataFrame,
     vix_1m: pd.DataFrame,
-    expiries_by_date: dict[date, list[Path]],
+    expiries_by_date: dict[date, list[Path]],   # kept for signature compat; not used
     *,
     regime_gated: bool,
 ) -> list[Trade]:
@@ -198,72 +241,64 @@ def simulate_one_pass(
     trades: list[Trade] = []
 
     trading_days = sorted({d for d in spot_1m.index.date})
-    expiries = sorted(expiries_by_date.keys())
-    day_to_expiry = map_day_to_expiry(trading_days, expiries)
-
-    chain_cache: dict[date, dict] = {}
 
     for day in trading_days:
-        if day not in day_to_expiry:
+        daily = load_daily_chain(day)
+        if daily is None:
             continue
-        exp = day_to_expiry[day]
-        if exp not in chain_cache:
-            chain_cache[exp] = load_chain_for_expiry(expiries_by_date[exp])
-        chain = chain_cache[exp]
 
         day_str = day.isoformat()
-        day_1m = spot_1m[spot_1m.index.date == day]
-        if day_1m.empty:
+        day_5m = resample(spot_1m[spot_1m.index.date == day], "5min")
+        if day_5m.empty:
             continue
-        day_5m = resample(day_1m, "5min")
-        day_15m = resample(day_1m, "15min")
-        prev_close = previous_day_close(spot_1m, day)
 
         # fresh classifier state per day
-        classifier._current = None
-        classifier._candidate = None
+        classifier._current = None  # type: ignore
+        classifier._candidate = None  # type: ignore
 
         open_trade: Optional[Trade] = None
-        is_expiry_day = (day == exp)
-        sl_pct = SL_PCT_EXPIRY if is_expiry_day else SL_PCT_NORMAL
-        tp_pct = TP_PCT_EXPIRY if is_expiry_day else TP_PCT_NORMAL
-        time_stop = TIME_STOP_EXPIRY_MIN if is_expiry_day else TIME_STOP_NORMAL_MIN
-
-        # current 1-min VIX series for this day
-        vix_today = vix_1m[vix_1m.index.date == day] if vix_1m is not None else None
+        sl_pct = SL_PCT_NORMAL
+        tp_pct = TP_PCT_NORMAL
+        time_stop = TIME_STOP_NORMAL_MIN
+        is_expiry_day = False
 
         for ts, row in day_5m.iterrows():
             spot_close = float(row["close"])
 
-            # 1) regime
-            feat = build_feature_for_bar(ts, day_5m, day_15m, prev_close, vix_1m)
+            # Build regime classifier features
+            feat = ClassifierFeatures(
+                ts=ts.to_pydatetime(),
+                gap_pct=0.0, or_range_pct=0.0, avg_or_range_pct=0.0025,
+                adx_15m=0.0, range_ratio=1.0, vwap_slope_30m=0.0,
+                dist_from_vwap_pct=0.0, price=spot_close, vwap=spot_close,
+                or_high=0.0, or_low=0.0, vix_level=15.0, vix_chg_15m=0.0,
+                dte=5, event_flag=False, prev_day_close=spot_close,
+            )
             regime = classifier.classify(feat)
 
-            # 2) monitor open trade
+            # Monitor open trade
             if open_trade is not None:
-                opt = get_option_price_at(chain, open_trade.strike,
-                                          open_trade.direction, ts)
-                if opt is not None:
-                    oclose, ohigh, olow = opt
+                opt_prem = get_option_premium_at(daily, open_trade.strike,
+                                                  open_trade.direction, ts)
+                if opt_prem is not None:
                     eff_entry = open_trade.entry_premium
                     tp = eff_entry * (1 + tp_pct)
                     sl = eff_entry * (1 - sl_pct)
                     mins_held = (ts - open_trade.entry_ts).total_seconds() / 60
 
-                    if ohigh >= tp:
+                    if opt_prem >= tp:
                         open_trade.close(ts, tp, "TP")
                         trades.append(open_trade); open_trade = None
-                    elif olow <= sl:
+                    elif opt_prem <= sl:
                         open_trade.close(ts, sl, "SL")
                         trades.append(open_trade); open_trade = None
                     elif mins_held >= time_stop:
-                        open_trade.close(ts, oclose, "TIME_STOP")
+                        open_trade.close(ts, opt_prem, "TIME_STOP")
                         trades.append(open_trade); open_trade = None
                     elif ts.time() >= FORCE_FLAT:
-                        open_trade.close(ts, oclose, "EOD")
+                        open_trade.close(ts, opt_prem, "EOD")
                         trades.append(open_trade); open_trade = None
 
-            # 3) attempt entry
             if open_trade is not None:
                 continue
             if ts.time() < ENTRY_AFTER or ts.time() >= ENTRY_CUTOFF:
@@ -273,71 +308,21 @@ def simulate_one_pass(
             if regime in (Regime.NO_TRADE, Regime.WAIT, Regime.EXPIRY):
                 continue
 
-            # Reconstruct chain state at this minute
-            chain_state = reconstruct_chain_state(
-                chain,
-                chain,    # 5min-ago handled by oi_at via window fallback in same chain
-                ts,
-                spot_close,
-            )
-            # Compute OI change vs 5 min ago using a separate lookup
-            ts_prev = ts - pd.Timedelta(minutes=5)
-            chain_state_5m_ago = reconstruct_chain_state(chain, chain, ts_prev, spot_close)
-            chain_state["oi_pattern"] = {
-                "ce_oi_change": (
-                    chain_state["focus_pcr"] * 0  # placeholder, replaced below
-                ),
-            }
-            # Properly recompute oi_change with the prev-snap PCR's totals
-            # (cleaner: just call reconstruct_chain_state twice — one at ts, one at ts_prev,
-            # then diff focus-zone CE/PE OI totals)
+            # Build chain state from daily data
+            chain_state = get_chain_state_at(daily, ts, spot_close)
 
-            # Re-derive precise OI change from focus-zone totals at ts vs ts_prev
-            atm = min(
-                {k[0] for k in chain.keys()},
-                key=lambda x: abs(x - spot_close),
-            )
-            focus_strikes = [atm + (i * STRIKE_STEP) for i in range(-3, 4)]
+            # Spot history
+            spot_history = [
+                {"time": idx.to_pydatetime(), "spot": float(r["close"])}
+                for idx, r in spot_1m.loc[ts - pd.Timedelta(minutes=15):ts].iterrows()
+            ]
 
-            def focus_oi_total(side: str, when: pd.Timestamp) -> float:
-                tot = 0.0
-                for s in focus_strikes:
-                    df = chain.get((s, side))
-                    if df is None:
-                        continue
-                    try:
-                        r = df.loc[when]
-                    except KeyError:
-                        w = df.loc[when - pd.Timedelta(minutes=2):when]
-                        if w.empty:
-                            continue
-                        r = w.iloc[-1]
-                    if isinstance(r, pd.DataFrame):
-                        r = r.iloc[0]
-                    tot += float(r.get("open_interest", 0))
-                return tot
-
-            ce_now = focus_oi_total("CE", ts)
-            pe_now = focus_oi_total("PE", ts)
-            ce_prev = focus_oi_total("CE", ts_prev)
-            pe_prev = focus_oi_total("PE", ts_prev)
-
-            chain_state["oi_pattern"] = {
-                "ce_oi_change": int(ce_now - ce_prev),
-                "pe_oi_change": int(pe_now - pe_prev),
-            }
-
-            # spot_history (last 15 1-min readings)
-            spot_history = build_spot_history(spot_1m, ts)
-
-            # India VIX
+            # VIX
             vix_level = 15.0
-            if vix_today is not None and not vix_today.empty:
-                vw = vix_today[vix_today.index <= ts]
-                if not vw.empty:
-                    vix_level = float(vw.iloc[-1]["close"])
+            vw = vix_1m[vix_1m.index <= ts]
+            if not vw.empty:
+                vix_level = float(vw.iloc[-1]["close"])
 
-            # Run the production engine
             sig = engine.evaluate(
                 spot_close=spot_close,
                 support=chain_state["support"],
@@ -346,7 +331,7 @@ def simulate_one_pass(
                 oi_pattern=chain_state["oi_pattern"],
                 spot_history=spot_history,
                 india_vix=vix_level,
-                expiry_date=exp.isoformat(),
+                expiry_date=day_str,
                 current_date=day_str,
             )
 
@@ -354,13 +339,9 @@ def simulate_one_pass(
             if direction is None:
                 continue
 
-            # Strike selection: ATM (matching production main.py default)
             atm_strike = int(round(spot_close / STRIKE_STEP) * STRIKE_STEP)
-            opt = get_option_price_at(chain, atm_strike, direction, ts)
-            if opt is None:
-                continue
-            oclose, _, _ = opt
-            if oclose < MIN_ENTRY_PREMIUM:
+            opt_prem = get_option_premium_at(daily, atm_strike, direction, ts)
+            if opt_prem is None or opt_prem < MIN_ENTRY_PREMIUM:
                 continue
 
             open_trade = Trade(
@@ -369,18 +350,18 @@ def simulate_one_pass(
                 direction=direction,
                 strike=atm_strike,
                 entry_ts=ts,
-                entry_premium=oclose,
+                entry_premium=opt_prem,
                 qty_lots=1,
                 regime_at_entry=regime,
             )
 
-        # End of day: force flat
+        # EOD force flat
         if open_trade is not None:
             last_ts = day_5m.index[-1]
-            opt = get_option_price_at(chain, open_trade.strike,
-                                      open_trade.direction, last_ts)
-            exit_premium = opt[0] if opt else open_trade.entry_premium
-            open_trade.close(last_ts, exit_premium, "EOD_FORCE")
+            opt_prem = get_option_premium_at(daily, open_trade.strike,
+                                              open_trade.direction, last_ts)
+            exit_prem = opt_prem if opt_prem else open_trade.entry_premium
+            open_trade.close(last_ts, exit_prem, "EOD_FORCE")
             trades.append(open_trade)
 
     return trades
@@ -509,12 +490,26 @@ def write_report(baseline: dict, gated: dict,
 
 # ---------------------------------- Main -------------------------------------
 
-def main() -> None:
+def main(time_stop_override: Optional[int] = None,
+         focus_zone_half: Optional[int] = None) -> None:
+    """Run Phase 4 backtest with optional parameter overrides.
+    
+    Args:
+        time_stop_override: Override TIME_STOP_NORMAL_MIN (default None = use Options.json)
+        focus_zone_half: Override focus zone half-range (e.g. 3 = ±3 strikes, default None = keep hardcoded)
+    """
+    global TIME_STOP_NORMAL_MIN, FOCUS_ZONE_HALF
+    if time_stop_override is not None:
+        TIME_STOP_NORMAL_MIN = time_stop_override
+        print(f"[OVERRIDE] TIME_STOP_NORMAL_MIN = {TIME_STOP_NORMAL_MIN} min")
+    if focus_zone_half is not None:
+        FOCUS_ZONE_HALF = focus_zone_half
+        print(f"[OVERRIDE] FOCUS_ZONE_HALF = {FOCUS_ZONE_HALF} (PCR uses ±{FOCUS_ZONE_HALF} strikes)")
+
     spot_1m = load_spot()
     vix_1m = load_vix()
-    expiries_by_date = discover_expiries(ROOT / "data")
-    print(f"Loaded spot rows={len(spot_1m):,}  VIX rows={len(vix_1m):,}  "
-          f"expiries={len(expiries_by_date)}")
+    expiries_by_date: dict[date, list[Path]] = {}
+    print(f"Loaded spot rows={len(spot_1m):,}  VIX rows={len(vix_1m):,}")
     print(f"Spot range: {spot_1m.index.min()} -> {spot_1m.index.max()}")
 
     print("\n=== Baseline (always armed) ===")
@@ -538,4 +533,12 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    import sys
+    if len(sys.argv) > 1:
+        # CLI usage: python backtest_regime_phase4.py <time_stop> [focus_zone_half]
+        ts = int(sys.argv[1]) if len(sys.argv) > 1 else None
+        fz = int(sys.argv[2]) if len(sys.argv) > 2 else None
+        print(f"CLI args: time_stop={ts}, focus_zone_half={fz}")
+        main(time_stop_override=ts, focus_zone_half=fz)
+    else:
+        main()

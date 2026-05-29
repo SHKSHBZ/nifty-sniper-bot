@@ -71,7 +71,7 @@ class DataFetcher:
         params = {"instrument_key": self.instrument_key}
         headers = {"Authorization": f"Bearer {self.access_token}", "Accept": "application/json"}
         try:
-            resp = self.session.get(url, params=params, headers=headers, timeout=5)
+            resp = self.session.get(url, params=params, headers=headers, timeout=15)
             if resp.status_code == 200:
                 data = resp.json().get("data", [])
                 expiries = {item.get("expiry") for item in data if item.get("expiry")}
@@ -83,8 +83,8 @@ class DataFetcher:
                         dt = datetime.strptime(e, "%Y-%m-%d").date()
                         # Valid if future, or if today and market is still open (< 15:30)
                         if dt > today or (dt == today and datetime.now().hour < 16):
-                            valid_expiries.append(dt)
-                            
+                             valid_expiries.append(dt)
+                             
                     if valid_expiries:
                         return min(valid_expiries).strftime("%Y-%m-%d")
         except Exception as e:
@@ -92,8 +92,8 @@ class DataFetcher:
 
         # Math Fallback (If API Call Fails)
         today = datetime.now().date()
-        # Nifty = Thursday (3), Sensex = Friday (4)
-        target_day = 4 if self.trading_index == "SENSEX" else 3
+        # Nifty = Tuesday (1) in this env, Sensex = Friday (4)
+        target_day = 4 if self.trading_index == "SENSEX" else 1
         days_ahead = (target_day - today.weekday()) % 7
         
         # If today is expiry day but market is closed, look at next week

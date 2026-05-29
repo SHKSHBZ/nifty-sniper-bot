@@ -127,7 +127,8 @@ class TacticDispatcher:
         # of regime — has its own selectivity built in.
         from tactics.t1_vix_direction import T1VIXDirectionTactic, T1Config
         self.t1_enabled = bool(opts.get("t1Enabled", True))
-        self.t1_tactic = T1VIXDirectionTactic(T1Config())
+        t1_vix_change = float(opts.get("t1VixChangeMinPct", 0.3))
+        self.t1_tactic = T1VIXDirectionTactic(T1Config(vix_change_min_pct=t1_vix_change))
         self._t1_fired_date = None       # date of last T1 firing (one per day)
         self._vix_open_today = None      # first VIX tick of the current day
         self._vix_open_date = None       # date of recorded vix open
@@ -157,6 +158,42 @@ class TacticDispatcher:
 
     def on_spot_tick(self, ts: datetime, spot: float) -> None:
         self.indicators.on_spot_tick(ts, spot)
+    def update_and_get_regime(self, ts: datetime, fetcher) -> str:
+        """Forces an indicator update and regime classification without running tactic routing.
+        Used by standalone bots (like Seller) that need the regime but don't want buyer signals.
+        """
+        spot = fetcher.get_spot()
+        if spot > 0:
+            self.indicators.on_spot_tick(ts, spot)
+        
+        snap = self.indicators.snapshot()
+        vix = fetcher.get_india_vix()
+        expiry_str = fetcher.get_expiry_date()
+        dte = self._compute_dte(expiry_str, ts)
+
+        feat = ClassifierFeatures(
+            ts=ts,
+            gap_pct=((snap["day_open"] - snap["prev_day_close"]) / snap["prev_day_close"]
+                     if snap["prev_day_close"] > 0 else 0.0),
+            or_range_pct=((snap["or_high"] - snap["or_low"]) / spot
+                          if (snap["or_high"] and snap["or_low"] and spot) else 0.0),
+            avg_or_range_pct=0.0025,
+            adx_15m=0.0,
+            range_ratio=1.0,
+            vwap_slope_30m=0.0,
+            dist_from_vwap_pct=0.0,
+            price=spot,
+            vwap=spot,
+            or_high=snap["or_high"],
+            or_low=snap["or_low"],
+            vix_level=vix,
+            vix_chg_15m=0.0,
+            dte=dte,
+            event_flag=False,
+            prev_day_close=snap["prev_day_close"],
+        )
+        regime = self.classifier.classify(feat)
+        return regime.value
 
     # ----- evaluate -----------------------------------------------------
 
@@ -341,8 +378,7 @@ class TacticDispatcher:
         if decision.tactic == Tactic.DEBIT_SPREAD:
             # Spreads are handled by spread_executor.py — not touched here.
             return _legacy_signal_no_trade(
-                f"[{regime.value}] DTE<=0 — spread tactic should run; "
-                f"dispatcher does not handle naked options on expiry day."
+                f"[{regime.value}] spread tactic — not implemented yet"
             )
 
         # ---- New tactic path ----

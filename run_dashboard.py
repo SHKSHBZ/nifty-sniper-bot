@@ -10,15 +10,17 @@ def cleanup():
     """Kill any processes running on ports 8000 and 3000."""
     if os.name == 'nt':
         print("[*] Cleaning up existing dashboard processes...")
-        # Kill processes on port 8000 (FastAPI) and 3000 (Next.js)
         for port in [8000, 3000]:
             try:
-                # Find PID on port
-                output = subprocess.check_output(f'netstat -ano | findstr :{port}', shell=True).decode()
+                output = subprocess.check_output(
+                    ["cmd", "/c", f"netstat -ano | findstr :{port}"],
+                    shell=False
+                ).decode()
                 for line in output.splitlines():
                     if 'LISTENING' in line:
                         pid = line.strip().split()[-1]
-                        subprocess.run(f'taskkill /F /PID {pid} /T', shell=True, capture_output=True)
+                        subprocess.run(["taskkill", "/F", "/PID", pid, "/T"],
+                                     capture_output=True)
             except Exception:
                 pass
     time.sleep(1)
@@ -33,9 +35,9 @@ def start_backend():
 def start_frontend():
     print("[*] Starting Next.js Dashboard...")
     # Bind to 0.0.0.0 to allow access via Tailscale/Local IP
+    # Use cmd.exe to bypass PowerShell execution policy blocking npm
     return subprocess.Popen(
-        "npm run dev -- -H 0.0.0.0",
-        shell=True,
+        ["cmd", "/c", "npm run dev -- -H 0.0.0.0"],
         cwd=BASE_DIR / "dashboard"
     )
 

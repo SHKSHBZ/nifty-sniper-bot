@@ -91,6 +91,19 @@ CONFIGS = {
                               filters={"skip_mondays": True,
                                        "skip_1100_1130": True,
                                        "skip_trend_down": True}),
+    # --- Time stop sweep (combined stack with varying time stops) ---
+    "E_time60":          dict(sl=0.30, tp=0.60, time_stop=60,
+                              filters={"skip_mondays": True,
+                                       "skip_1100_1130": True,
+                                       "skip_trend_down": True}),
+    "F_time90":          dict(sl=0.30, tp=0.60, time_stop=90,
+                              filters={"skip_mondays": True,
+                                       "skip_1100_1130": True,
+                                       "skip_trend_down": True}),
+    "G_time150":         dict(sl=0.30, tp=0.60, time_stop=150,
+                              filters={"skip_mondays": True,
+                                       "skip_1100_1130": True,
+                                       "skip_trend_down": True}),
 }
 
 
@@ -117,12 +130,17 @@ def run() -> None:
     print(f"Date range: {sorted([r.entry_ts for r in records])[0]} -> "
           f"{sorted([r.entry_ts for r in records])[-1]}")
 
-    # ----- Compare 4 configs in-sample -----
+    # ----- Compare all configs in-sample -----
     results = {}
     for name, cfg in CONFIGS.items():
         results[name] = evaluate(records, **cfg)
 
-    # ----- Walk-forward 50/50 on D -----
+    # ----- Time stop comparison: find best time stop -----
+    time_stop_configs = {k: v for k, v in CONFIGS.items() if k.startswith("E_") or k.startswith("F_") or k.startswith("G_")}
+    best_time_stop_name = max(time_stop_configs, key=lambda k: results[k]["net_pnl"])
+    best_time_stop_val = CONFIGS[best_time_stop_name]["time_stop"]
+
+    # ----- Walk-forward 50/50 on best time stop -----
     sorted_recs = sorted(records, key=lambda r: r.entry_ts)
     cut = len(sorted_recs) // 2
     train, test = sorted_recs[:cut], sorted_recs[cut:]
@@ -131,24 +149,29 @@ def run() -> None:
     wf_test = evaluate(test, **CONFIGS["D_combined_stack"])
     wf_train_prod = evaluate(train, **CONFIGS["A_prod_today"])
     wf_test_prod = evaluate(test, **CONFIGS["A_prod_today"])
+    wf_train_best_time = evaluate(train, **CONFIGS[best_time_stop_name])
+    wf_test_best_time = evaluate(test, **CONFIGS[best_time_stop_name])
 
     # ----- VIX distribution -----
     vix_dist = vix_distribution()
 
     # ----- Output -----
     out = []
-    out.append("# Phase 8 — Combined Stack Backtest\n")
-    out.append("Compares production today vs TP=60-only vs filters-only vs full stack.\n")
+    out.append("# Phase 8 — Combined Stack + Time Stop Sweep\n")
+    out.append("Compares production today vs TP=60-only vs filters-only vs combined stack, plus time stop sweep (60/90/150 min).\n")
     out.append("")
 
     out.append("## Side-By-Side Results (98 captured records)\n")
     out.append("| Config | Trades | Win% | Net P&L | Profit Factor | Max DD | P&L/DD |")
     out.append("|---|---:|---:|---:|---:|---:|---:|")
     name_label = {
-        "A_prod_today": "A — Production today (TP 50, no filters)",
-        "B_tp60_only": "B — TP 60 only",
-        "C_filters_only": "C — Filters only (TP 50)",
-        "D_combined_stack": "D — TP 60 + 3 filters (combined)",
+        "A_prod_today": "A — Production today (TP 50, SL 30, time 120, no filters)",
+        "B_tp60_only": "B — TP 60 only (same SL/time)",
+        "C_filters_only": "C — Filters only (TP 50, SL 30, time 120)",
+        "D_combined_stack": "D — TP 60 + 3 filters (time 120)",
+        "E_time60": "E — Combined + Time Stop 60min",
+        "F_time90": "F — Combined + Time Stop 90min",
+        "G_time150": "G — Combined + Time Stop 150min",
     }
     for k in CONFIGS:
         r = results[k]
@@ -188,6 +211,26 @@ def run() -> None:
     test_delta = wf_test["net_pnl"] - wf_test_prod["net_pnl"]
     out.append(f"- TRAIN improvement vs prod: **Rs {train_delta:+,.0f}**")
     out.append(f"- TEST  improvement vs prod: **Rs {test_delta:+,.0f}**")
+    out.append("")
+
+    # ----- Walk-forward on best time stop -----
+    out.append(f"## Walk-Forward 50/50 — Best Time Stop ({best_time_stop_val}min)\n")
+    out.append("| Half | Config | Trades | Win% | Net P&L |")
+    out.append("|---|---|---:|---:|---:|")
+    out.append(f"| TRAIN (first 49) | A — Prod today | {wf_train_prod['trades']} | "
+               f"{wf_train_prod['win_rate']:.1f} | Rs {wf_train_prod['net_pnl']:,.0f} |")
+    best_label = f"Best Time ({best_time_stop_val}min)"
+    out.append(f"| TRAIN (first 49) | {best_label} | {wf_train_best_time['trades']} | "
+               f"{wf_train_best_time['win_rate']:.1f} | Rs {wf_train_best_time['net_pnl']:,.0f} |")
+    out.append(f"| TEST  (last 49)  | A — Prod today | {wf_test_prod['trades']} | "
+               f"{wf_test_prod['win_rate']:.1f} | Rs {wf_test_prod['net_pnl']:,.0f} |")
+    out.append(f"| TEST  (last 49)  | {best_label} | {wf_test_best_time['trades']} | "
+               f"{wf_test_best_time['win_rate']:.1f} | Rs {wf_test_best_time['net_pnl']:,.0f} |")
+    out.append("")
+    train_delta_bt = wf_train_best_time["net_pnl"] - wf_train_prod["net_pnl"]
+    test_delta_bt = wf_test_best_time["net_pnl"] - wf_test_prod["net_pnl"]
+    out.append(f"- TRAIN improvement vs prod: **Rs {train_delta_bt:+,.0f}**")
+    out.append(f"- TEST  improvement vs prod: **Rs {test_delta_bt:+,.0f}**")
     out.append("")
 
     # ----- VIX distribution (PE-asymmetry root cause) -----

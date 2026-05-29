@@ -2,7 +2,7 @@
     "project_name": "NiftySensex_Weekly_Options_Seller_Bot",
     "version": "1.0.0-seller-v1",
     "trading_index": "NIFTY",
-    "focus_zone_writer": false,
+    "focus_zone_writer": true,
     "_seller_summary": "Seller bot v1 (2026-05-17). Sells Iron Condors on RANGE-classified days only. Defined-risk only — no naked sells. Force-close 15:15 IST. Paper mode only for first 2 weeks of observation.",
     "environment": {
         "broker_api": "Upstox-v2"

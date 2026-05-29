@@ -36,7 +36,7 @@ _ROUTE_TABLE: dict[Regime, RouteDecision] = {
     Regime.TREND_UP:       RouteDecision(Tactic.OI_TREND_PULLBACK, "CE", "trend day, pullback entry"),
     Regime.TREND_DOWN:     RouteDecision(Tactic.OI_TREND_PULLBACK, "PE", "trend day, pullback entry"),
     Regime.RANGE:          RouteDecision(Tactic.OI_WALL_MEAN_REVERSION, None, "range day, fade OI walls"),
-    Regime.EXPIRY:         RouteDecision(Tactic.DEBIT_SPREAD, None, "0-DTE, spreads only"),
+    Regime.EXPIRY:         RouteDecision(Tactic.OI_WALL_MEAN_REVERSION, None, "0-DTE, tight params via OI walls"),
     Regime.CHOP:           RouteDecision(Tactic.NO_TRADE, None, "chop — sit out"),
     Regime.NO_TRADE:       RouteDecision(Tactic.NO_TRADE, None, "event/VIX halt"),
     Regime.WAIT:           RouteDecision(Tactic.NO_TRADE, None, "gap day, awaiting morning lock"),

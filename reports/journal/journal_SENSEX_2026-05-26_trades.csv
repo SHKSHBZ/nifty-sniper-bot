@@ -1,0 +1,1 @@
+date,tactic,direction,strike,qty_lots,entry_ts,entry_premium,exit_ts,exit_premium,sl_pct,tp_pct,time_stop_min,exit_reason,regime_at_entry,net_pnl,outcome,optimal_exit_premium,optimal_exit_ts,captured_pct_of_optimum,entry_reason,exit_reason_text,win_lose_explanation,counterfactual_notes,suggestions,entry_state_json
