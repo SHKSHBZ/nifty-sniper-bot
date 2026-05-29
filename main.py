@@ -30,7 +30,9 @@ index_str = "SENSEX" if (len(sys.argv) > 1 and "sensex" in sys.argv[1].lower()) 
 _is_regime_arg = (len(sys.argv) > 1 and "_regime" in sys.argv[1].lower())
 _is_t1_arg     = (len(sys.argv) > 1 and "_t1" in sys.argv[1].lower())
 _is_t2_arg     = (len(sys.argv) > 1 and "_t2" in sys.argv[1].lower())
-if _is_t1_arg:       _log_suffix = "_t1"
+_is_seller_arg = (len(sys.argv) > 1 and "seller" in sys.argv[1].lower())
+if _is_seller_arg:   _log_suffix = "_seller"
+elif _is_t1_arg:     _log_suffix = "_t1"
 elif _is_t2_arg:     _log_suffix = "_t2"
 elif _is_regime_arg: _log_suffix = "_regime"
 else:                _log_suffix = ""
@@ -81,9 +83,14 @@ class LiveOrchestrator:
         # so multiple engines can run side-by-side on the same index without
         # overwriting each other's portfolios.
         self.engine_mode = self.config.get("engine_mode", "legacy")
-        # T1/T2 variants take precedence over regime suffix (each is its
-        # own bot, though they internally run in regime mode).
-        if "_t1" in config_file.lower():
+        # Seller mode = run iron-condor entry/monitor/close path instead of
+        # the buyer scan. Mutually exclusive with single-leg / straddle paths.
+        self.seller_mode = bool(self.config.get("seller_mode", False))
+        # T1/T2/seller variants take precedence over regime suffix (each is
+        # its own bot, though they internally run in regime mode).
+        if self.seller_mode:
+            self.portfolio_file = Path(f"data/paper_portfolio_{index_str}_seller.json")
+        elif "_t1" in config_file.lower():
             self.portfolio_file = Path(f"data/paper_portfolio_{index_str}_t1.json")
         elif "_t2" in config_file.lower():
             self.portfolio_file = Path(f"data/paper_portfolio_{index_str}_t2.json")
@@ -108,6 +115,7 @@ class LiveOrchestrator:
             LiveMissedTracker(
                 self.journal, self.fetcher,
                 lot_size=self.lot_size,
+                max_pending=50,
             ) if self.journal is not None else None
         )
         self._last_nm_probe_ts: datetime | None = None
@@ -115,8 +123,11 @@ class LiveOrchestrator:
         # process) can render live indicators. File-based IPC keeps the
         # bot decoupled from the web layer.
         # Suffix state files with the variant name when running parallel
-        # bots, so legacy / regime / t1 don't overwrite each other's state.
-        if "_t1" in config_file.lower():
+        # bots, so legacy / regime / t1 / seller don't overwrite each
+        # other's state.
+        if self.seller_mode:
+            state_index = index_str + "_seller"
+        elif "_t1" in config_file.lower():
             state_index = index_str + "_t1"
         elif "_t2" in config_file.lower():
             state_index = index_str + "_t2"
@@ -144,10 +155,16 @@ class LiveOrchestrator:
         self.adverse_oi_growth_exit_pct = float(opts.get("adverseOiGrowthExitPct", 8.0)) / 100.0
         self.time_stop_minutes = int(opts.get("timeStopMinutes", 30))
         self.time_stop_min_profit_pct = float(opts.get("timeStopMinProfitPct", 0.5)) / 100.0
+        self.theta_shield_normal_mins = int(opts.get("thetaShieldNormalMins", 60))
+        self.theta_shield_expiry_mins = int(opts.get("thetaShieldExpiryMins", 45))
         self._session_start_capital: float | None = None  # set on first scan of day
         self._consecutive_losses = 0
-        # _regime_lock: None | 'STOPPED' | 'CE_ONLY' | 'PE_ONLY' — set after
-        # consecutive-loss diagnostic; reset at the start of each new day.
+        self._consecutive_zone_inv = 0   # zone-inv counter: 2 in a row → lock day
+        self._sl_hit_count = 0           # SL hit counter for cooldown
+        self._cooldown_until: datetime | None = None  # no entries until this time
+        self._cooldown_reason: str = ""  # why we're in cooldown
+        # _regime_lock: None | 'STOPPED' | 'CE_ONLY' | 'PE_ONLY' | 'NO_TRADE' — set after
+        # consecutive-loss diagnostic or zone-inv guard; reset at the start of each new day.
         self._regime_lock: str | None = None
         self._regime_lock_reasons: list[str] = []
         logger.info(f"[OK] Engine mode: {self.engine_mode}, "
@@ -171,6 +188,8 @@ class LiveOrchestrator:
             self.portfolio = {"capital": 100000.0, "open_position": None, "trade_history": []}
         # T2: ensure the straddle slot exists (None if not currently active)
         self.portfolio.setdefault("open_straddle", None)
+        # Seller bot: ensure the iron-condor slot exists
+        self.portfolio.setdefault("open_iron_condor", None)
 
     def save_portfolio(self):
         self.portfolio_file.parent.mkdir(exist_ok=True)
@@ -217,6 +236,20 @@ class LiveOrchestrator:
                     self._finalize_journal_day()
                     break
 
+                # ── Seller mode (iron condor only) ────────────────────
+                # Runs a completely separate flow from the buyer paths.
+                # Skips single-leg / straddle scans entirely.
+                if self.seller_mode:
+                    if self.portfolio.get("open_iron_condor"):
+                        self._monitor_iron_condor(now)
+                        time.sleep(3)
+                    else:
+                        self._scan_for_iron_condor_entry(now)
+                        sleep_secs = 60 - datetime.now(IST).second
+                        time.sleep(max(1, sleep_secs))
+                    continue
+
+                # ── Buyer mode (legacy + regime + T1 + T2) ────────────
                 # Priority order: straddle (T2) > single-leg (T1, regime) > scan.
                 # Both can never coexist (straddle blocks single-leg entry and
                 # vice versa via _scan_for_entries gating).
@@ -301,8 +334,59 @@ class LiveOrchestrator:
         if live_premium <= 0:
             return # Data error/stale
 
-        # Journal: record path tick (HOL approximated by close since live
-        # quote is a single value per call — refine if intra-tick OHLC available)
+        entry_price = pos['entry_price']
+        remaining = pos.get('remaining_lots', pos.get('total_lots', 5))
+        total_lots = pos.get('total_lots', 5)
+        lots_sold = pos.get('lots_sold', 0)
+
+        # ── Tiered Profit Booking (2026-05-26) ─────────────────────────
+        pts_from_entry = live_premium - entry_price
+        TIER1_PTS = 20
+        TIER2_PTS = 35
+        TIER1_LOTS = 3
+        TIER2_LOTS = 1
+        TRAIL_LOTS = 1
+
+        # Tier 1: +20 pts → sell 3 lots
+        if not pos.get('tier1_done') and pts_from_entry >= TIER1_PTS:
+            lots_to_sell = min(TIER1_LOTS, remaining)
+            if lots_to_sell > 0:
+                pnl_tier1 = pts_from_entry * lots_to_sell * self.lot_size
+                self._partial_close(pos, live_premium, lots_to_sell,
+                                    f"TIER1 (+{TIER1_PTS}pts, {lots_to_sell} lots)")
+                pos['tier1_done'] = True
+                pos['remaining_lots'] = pos.get('remaining_lots', total_lots) - lots_to_sell
+                pos['lots_sold'] = pos.get('lots_sold', 0) + lots_to_sell
+                self.save_portfolio()
+                remaining = pos['remaining_lots']
+
+        # Tier 2: +35 pts → sell 1 lot
+        if pos.get('tier1_done') and not pos.get('tier2_done') and pts_from_entry >= TIER2_PTS:
+            lots_to_sell = min(TIER2_LOTS, remaining)
+            if lots_to_sell > 0:
+                self._partial_close(pos, live_premium, lots_to_sell,
+                                    f"TIER2 (+{TIER2_PTS}pts, {lots_to_sell} lot)")
+                pos['tier2_done'] = True
+                pos['remaining_lots'] = pos.get('remaining_lots', 1) - lots_to_sell
+                pos['lots_sold'] = pos.get('lots_sold', 0) + lots_to_sell
+                self.save_portfolio()
+                remaining = pos['remaining_lots']
+
+        # Trail lot: activate breakeven SL once Tier 2 is done
+        if pos.get('tier2_done') and not pos.get('trail_active'):
+            pos['trail_active'] = True
+            pos['trail_cost'] = entry_price  # breakeven
+            pos['sl_price'] = entry_price    # trail stop at cost
+            logger.info(f"🟢 TRAIL ACTIVE: last {TRAIL_LOTS} lot at breakeven (Rs.{entry_price:.2f})")
+            self.save_portfolio()
+
+        # If no remaining lots, close position
+        if pos.get('remaining_lots', 0) <= 0:
+            self.portfolio["open_position"] = None
+            self.save_portfolio()
+            return
+
+        # Journal: record path tick
         if self.journal is not None and self._journal_day_started:
             try:
                 tactic_name = pos.get('tactic_name', 'oi_wall_mean_reversion')
@@ -312,46 +396,95 @@ class LiveOrchestrator:
             except Exception as e:
                 logger.debug(f"Journal on_path_tick failed: {e}")
 
-        # Even while holding a position, surface any near-misses on the
-        # OPPOSITE-direction side. Probe at most once a minute.
+        # Probe near-misses on opposite direction
         self._probe_near_misses_in_position(now, pos)
 
-        # 1. Update Trailing Stop Loss if profit hits +15%
-        if live_premium >= pos['entry_price'] * 1.15 and not pos.get('tsl_active'):
+        # 1. Update Trailing Stop Loss if profit hits +15% (legacy)
+        if live_premium >= entry_price * 1.15 and not pos.get('tsl_active'):
             pos['tsl_active'] = True
-            pos['dynamic_sl'] = pos['entry_price'] * 1.02 # Trail to +2% Breakeven
+            pos['dynamic_sl'] = entry_price * 1.02
             logger.info(f"🟢 TRAILING STOP ACTIVATED! SL moved to Breakeven (+2%): Rs.{pos['dynamic_sl']:.2f}")
 
         current_sl = pos.get('dynamic_sl', pos['sl_price'])
         
-        # 2. Check Exits
+        # 2. Check Exits for remaining lots
         time_held_mins = (now - datetime.fromisoformat(pos['entry_time'])).total_seconds() / 60
-        max_hold = 45 if pos['is_expiry_day'] else 120
+        max_hold = self.theta_shield_expiry_mins if pos.get('is_expiry_day') else self.theta_shield_normal_mins
 
         exit_reason = None
-        if live_premium >= pos['target_price']:
-            exit_reason = "TARGET HIT (+Profit)"
-        elif live_premium <= current_sl:
+        if live_premium <= current_sl:
             exit_reason = "TRAILING STOP" if pos.get('tsl_active') else "HARD STOP LOSS"
         elif time_held_mins >= max_hold:
             exit_reason = "THETA SHIELD (Time Stop Exceeded)"
         else:
-            # PR 3: active-management exits. These run only if the position
-            # has not already hit target/SL/theta-shield. Each check is
-            # bounded — pulls from cached fetcher state (no extra API calls).
             active_reason = self._check_active_exits(now, pos, live_premium, time_held_mins)
             if active_reason:
                 exit_reason = active_reason
 
         if exit_reason:
             self._close_position(exit_reason, exit_price=live_premium)
+            # ── Zone-inv guard: 2 consecutive → lock for day
+            if "ZONE INVALIDATED" in exit_reason:
+                self._consecutive_zone_inv += 1
+                self._sl_hit_count = 0  # reset SL counter on zone-inv
+                if self._consecutive_zone_inv >= 2:
+                    self._regime_lock = "NO_TRADE"
+                    logger.warning(
+                        f"[ZONE-LOCK] {self._consecutive_zone_inv} consecutive zone "
+                        f"invalidations — locking for rest of day."
+                    )
+            # ── SL cooldown: 2 SL hits → pause 20 min + reassess ─────
+            elif "STOP LOSS" in exit_reason or "HARD STOP" in exit_reason:
+                self._sl_hit_count += 1
+                self._consecutive_zone_inv = 0  # reset zone-inv counter on SL
+                if self._sl_hit_count >= 2:
+                    cooldown_mins = 20
+                    self._cooldown_until = now + timedelta(minutes=cooldown_mins)
+                    self._cooldown_reason = f"2 SL hits — reassessing S/R, OI, trend"
+                    self._sl_hit_count = 0  # reset after triggering cooldown
+                    logger.warning(
+                        f"[COOLDOWN] {cooldown_mins}min pause starting now. "
+                        f"Reassessing: S/R zones, OI flows, trend direction."
+                    )
+            else:
+                self._consecutive_zone_inv = 0
+                # Winning trade resets SL counter — market "forgave" us
+                self._sl_hit_count = 0
             return
 
-        logger.info(f"Holding Position: {pos['trade_type']} | Live: Rs.{live_premium:.2f} | Time Held: {int(time_held_mins)}m")
+        tier_status = ""
+        if not pos.get('tier1_done'):
+            tier_status = f" | T1: {pts_from_entry:+.0f}/{TIER1_PTS}pts"
+        elif not pos.get('tier2_done'):
+            tier_status = f" | T2: {pts_from_entry:+.0f}/{TIER2_PTS}pts"
+        elif pos.get('trail_active'):
+            tier_status = f" | TRAIL at cost {pos['trail_cost']:.1f}"
+        logger.info(f"Holding: {pos['trade_type']} | Live: Rs.{live_premium:.2f} | "
+                    f"Remaining: {pos.get('remaining_lots', '?')} lots | "
+                    f"Time: {int(time_held_mins)}m{tier_status}")
 
     def _scan_for_entries(self, now):
         # `now` is already an IST tz-aware datetime supplied by run()
         if now.time() < ENTRY_WINDOW_OPEN: return
+
+        # ── Cooldown check (SL-triggered tactical pause) ────────────────
+        if self._cooldown_until is not None:
+            if now < self._cooldown_until:
+                remaining = int((self._cooldown_until - now).total_seconds() / 60) + 1
+                if remaining % 5 == 0:  # log every 5 min during cooldown
+                    logger.info(f"[COOLDOWN] {remaining}min remaining — {self._cooldown_reason}")
+                return
+            # ── Cooldown expired: reassess market before resuming ────────
+            self._cooldown_until = None
+            decision = self._reassess_market(now)
+            if not decision["can_trade"]:
+                # Extend cooldown by 10 min if market still unclear
+                self._cooldown_until = now + timedelta(minutes=10)
+                self._cooldown_reason = f"reassess: {decision['reason']}"
+                logger.warning(f"[COOLDOWN] Extended 10min — {decision['reason']}")
+                return
+            logger.info(f"[COOLDOWN] Reassessment PASSED — resuming. {decision['reason']}")
+            self._cooldown_reason = ""
 
         # Daily entry cap. Counter resets at the first scan of each new day.
         today_str = now.date().isoformat()
@@ -362,6 +495,10 @@ class LiveOrchestrator:
             self._session_start_capital = self.portfolio["capital"]
             self._consecutive_losses = 0
             self._regime_lock = None
+            self._consecutive_zone_inv = 0
+            self._sl_hit_count = 0
+            self._cooldown_until = None
+            self._cooldown_reason = ""
             self._regime_lock_reasons = []
             logger.info(f"[DAY-START] cap={self._session_start_capital:.0f}, "
                         f"drawdown breaker armed at -{self.daily_drawdown_pct*100:.1f}%")
@@ -391,6 +528,58 @@ class LiveOrchestrator:
         focus_pcr = self.fetcher.get_focus_pcr()
 
         if spot == 0 or sup == 0: return
+
+        # ── Trend-confidence chop guard (added 2026-05-17) ────────────────
+        # Block directional entries when the recent spot move is within
+        # noise. Score < 1.0 = move is indistinguishable from chop. This
+        # gate is bypassed for T1/T2 entries (handled by dispatcher) since
+        # they have their own time-gated entry windows independent of trend.
+        #
+        # OI-AWARE OVERRIDE (added 2026-05-26): When the OI conviction is
+        # strong (PE writers >> CE writers for bullish, or CE writers >>
+        # PE writers for bearish), the price-based chop guard is overridden.
+        # Rationale: OI flows are a leading indicator — smart money
+        # positioning can signal a trend before price volatility confirms it.
+        if self.engine_mode == "regime":
+            try:
+                snap = self.dispatcher.indicators.snapshot()
+                tc_score = float(snap.get("trend_confidence", 0) or 0)
+                tc_dir = snap.get("trend_direction", "FLAT")
+                if 0 < tc_score < 0.5:
+                    # ── OI conviction override ──────────────────────────
+                    oi_override = False
+                    oi_override_dir = None
+                    try:
+                        oi = self.fetcher.get_oi_pattern()
+                        if oi and isinstance(oi, dict):
+                            ce_chg = abs(float(oi.get("ce_oi_change", 0) or 0))
+                            pe_chg = abs(float(oi.get("pe_oi_change", 0) or 0))
+                            # PE writers building faster → bullish conviction
+                            if ce_chg > 0 and pe_chg > 0:
+                                pe_ce_ratio = pe_chg / ce_chg
+                                if pe_ce_ratio >= 1.30:
+                                    oi_override = True
+                                    oi_override_dir = "CE"
+                                elif pe_ce_ratio <= 0.70:
+                                    oi_override = True
+                                    oi_override_dir = "PE"
+                    except Exception:
+                        pass
+
+                    if oi_override and oi_override_dir:
+                        logger.info(
+                            f"[CHOP GUARD] Trend confidence {tc_score:.2f}x ({tc_dir}) "
+                            f"OVERRIDDEN — OI conviction {oi_override_dir} "
+                            f"(PE/CE OI ratio). Spot {spot:.1f}"
+                        )
+                    else:
+                        logger.info(
+                            f"[CHOP GUARD] Trend confidence {tc_score:.2f}x ({tc_dir}) "
+                            f"below 0.5 — skipping entry scan. Spot {spot:.1f}"
+                        )
+                        return
+            except Exception as e:
+                logger.debug(f"trend-confidence check failed: {e}")
 
         # Dispatcher abstracts: legacy mode -> SignalEngine.evaluate; regime
         # mode -> classifier+router+tactics with fallback to SignalEngine for
@@ -425,9 +614,9 @@ class LiveOrchestrator:
         if signal['direction']:
             direction = signal['direction']
 
-            # PR 2: regime lock from consecutive-loss diagnostic.
-            # If classifier said TRENDING_UP after 2 losses, we only take CE
-            # for the rest of the day (and inverse for TRENDING_DOWN).
+            # PR 2: regime lock from consecutive-loss or zone-inv diagnostic
+            if self._regime_lock == "NO_TRADE":
+                return  # zone structure broken for the day
             if self._regime_lock == "CE_ONLY" and direction == "PE":
                 logger.info(f"[REGIME LOCK] PE blocked — classifier locked CE_ONLY")
                 return
@@ -435,20 +624,45 @@ class LiveOrchestrator:
                 logger.info(f"[REGIME LOCK] CE blocked — classifier locked PE_ONLY")
                 return
 
-            # We enforce Delta > 0.40 rule here
-            # Buy ITM or slightly ATM depending on the wall
+            # ── ITM strike selection (2026-05-26) ──────────────────────────
+            # Pick 1-2 strikes ITM for higher delta (0.65-0.85) so premium
+            # moves faster with spot and theta decay has less relative impact.
+            # CE (bullish): 1-2 strikes BELOW ATM → ITM call
+            # PE (bearish): 1-2 strikes ABOVE ATM → ITM put
             atm_strike = int(round(spot / self.strike_step) * self.strike_step)
-            
-            # Find the best valid strike from the Greeks map
-            best_strike = atm_strike
-            live_premium = self.fetcher.get_option_ltp(best_strike, direction)
-            
-            # Guard: Reject if premium data is missing or zero
-            if live_premium <= 0:
-                logger.info(f"Signal Generated ({direction}) but premium for {best_strike} is Rs.{live_premium}. Stale data. Skipping.")
-                return
+            itm_offset = 1  # try 1 strike ITM first; fall back to 2 if delta too low
+            max_attempts = 2
 
-            greeks = self.fetcher.get_strike_greeks(best_strike, direction)
+            best_strike = atm_strike
+            live_premium = 0.0
+            greeks = {}
+
+            for attempt in range(max_attempts):
+                if direction == "CE":
+                    candidate_strike = atm_strike - ((attempt + 1) * self.strike_step)
+                else:  # PE
+                    candidate_strike = atm_strike + ((attempt + 1) * self.strike_step)
+
+                candidate_premium = self.fetcher.get_option_ltp(candidate_strike, direction)
+                if candidate_premium <= 0:
+                    continue
+                candidate_greeks = self.fetcher.get_strike_greeks(candidate_strike, direction)
+                candidate_delta = abs(float(candidate_greeks.get('delta', 0) or 0))
+                if candidate_delta == 0:
+                    candidate_delta = 0.50
+
+                # Accept if delta >= 0.55 (meaningful ITM) or this is our last attempt
+                if candidate_delta >= 0.55 or attempt == max_attempts - 1:
+                    best_strike = candidate_strike
+                    live_premium = candidate_premium
+                    greeks = candidate_greeks
+                    break
+
+            # Fallback: if no ITM strike found, use ATM
+            if live_premium <= 0:
+                best_strike = atm_strike
+                live_premium = self.fetcher.get_option_ltp(best_strike, direction)
+                greeks = self.fetcher.get_strike_greeks(best_strike, direction)
 
             delta = greeks.get('delta', 0)
             
@@ -456,30 +670,37 @@ class LiveOrchestrator:
             if delta == 0:
                 delta = 0.50
                 
-            if delta < 0.35: # Allowing slight leniency if actual ATM drops dropping live
+            if delta < 0.30: # Allowing slight leniency if actual ATM drops dropping live
                 logger.info(f"Signal Generated ({direction}) but ATM Delta is too low ({delta:.2f}). Rejecting.")
                 return
 
-            # Paper Fill — defer to tactic-prescribed sl/tp if dispatcher
-            # supplied them, otherwise use legacy defaults.
+            # ── Fixed 5-lot position with tiered profit booking (2026-05-26) ──
+            # Always enter with 5 lots. Exit in tiers:
+            #   Tier 1: +20 pts → sell 3 lots (book quick profit)
+            #   Tier 2: +35 pts → sell 1 lot  (ride further)
+            #   Tier 3: trail 1 lot at cost (let it run, breakeven SL)
+            # Legacy SL/TP/theta exits apply to REMAINING lots only.
+            TOTAL_LOTS = 5
+            TIER1_PTS = 20   # sell 3 lots at +20 points from entry
+            TIER2_PTS = 35   # sell 1 lot at +35 points from entry
+            TIER1_LOTS = 3
+            TIER2_LOTS = 1
+            TRAIL_LOTS = 1   # 1 lot trailed at cost
+
+            qty = self.lot_size * TOTAL_LOTS
             is_expiry = signal['is_expiry_day']
-            sl_pct = signal.get('tactic_sl_pct') or (0.20 if is_expiry else 0.20)
-            tgt_pct = signal.get('tactic_tp_pct') or (0.35 if is_expiry else 0.50)
+            sl_pct = signal.get('tactic_sl_pct') or (0.15 if is_expiry else 0.15)  # tightened to 15%
             time_stop_min = signal.get('tactic_time_stop_min',
                                         45 if is_expiry else 120)
 
             sl_prem = live_premium * (1 - sl_pct)
-            tgt_prem = live_premium * (1 + tgt_pct)
-
-            qty = self.lot_size # Dynamic Lot Size from Config
             tactic_name = signal.get('tactic_name', 'oi_wall_mean_reversion')
 
             # Increment daily entry counter — checked at top of next scan.
             self._positions_today_count += 1
 
             # PR 3: snapshot entry-time PCR + focus-zone OI so the
-            # active-management exits (PCR shift, adverse OI, time-stop)
-            # have a baseline to compare against.
+            # active-management exits have a baseline to compare against.
             entry_oi = self.fetcher.get_oi_pattern() or {}
             self.portfolio["open_position"] = {
                 "entry_time": now.isoformat(),
@@ -488,15 +709,23 @@ class LiveOrchestrator:
                 "opt_type": direction,
                 "entry_price": live_premium,
                 "qty": qty,
+                "total_lots": TOTAL_LOTS,
+                "remaining_lots": TOTAL_LOTS,
+                "lots_sold": 0,
+                "tier1_done": False,
+                "tier2_done": False,
+                "trail_active": False,
+                "trail_cost": live_premium,  # breakeven level for trail lot
                 "sl_price": sl_prem,
-                "target_price": tgt_prem,
+                "target_price": None,  # no single target — tiered exits
                 "is_expiry_day": is_expiry,
                 "tsl_active": False,
                 "tactic_name": tactic_name,
                 "sl_pct": sl_pct,
-                "tp_pct": tgt_pct,
+                "tp_pct": 0.0,   # not used with tiered exits
                 "time_stop_min": time_stop_min,
                 "entry_pcr": float(focus_pcr),
+                "entry_spot": float(spot),
                 "entry_total_ce_oi": float(entry_oi.get("total_ce_oi", 0) or 0),
                 "entry_total_pe_oi": float(entry_oi.get("total_pe_oi", 0) or 0),
             }
@@ -528,12 +757,18 @@ class LiveOrchestrator:
                 except Exception as e:
                     logger.warning(f"Journal on_entry failed: {e}")
 
+            itm_tag = f"ITM ({abs(atm_strike - best_strike) // self.strike_step} strike{'s' if abs(atm_strike - best_strike) // self.strike_step > 1 else ''} in)" if best_strike != atm_strike else "ATM"
+            sup = self.fetcher.get_support()
+            res = self.fetcher.get_resistance()
             msg = (f"🚀 PAPER TRADE ENTERED\n"
-                   f"Type: BUY {best_strike} {direction}\n"
-                   f"Entry: Rs. {live_premium:.2f}\n"
-                   f"Target: Rs. {tgt_prem:.2f} | SL: Rs. {sl_prem:.2f}\n"
-                   f"Reason: {signal['reasons'][0]}\n"
-                   f"Delta: {delta:.2f}")
+                   f"Type: BUY {best_strike} {direction} [{itm_tag}]\n"
+                   f"Entry: Rs. {live_premium:.2f} x {TOTAL_LOTS} lots\n"
+                   f"Zone: S={sup} → R={res}\n"
+                   f"Tier1: +{TIER1_PTS}pts → sell {TIER1_LOTS} lots | "
+                   f"Tier2: +{TIER2_PTS}pts → sell {TIER2_LOTS} lot | "
+                   f"Trail: {TRAIL_LOTS} lot at cost\n"
+                   f"SL: Rs. {sl_prem:.2f} | Delta: {delta:.2f}\n"
+                   f"Reason: {signal['reasons'][0]}")
             logger.info(msg)
             self.telegram.send_message(msg)
         else:
@@ -542,35 +777,109 @@ class LiveOrchestrator:
 
 
     def _check_active_exits(self, now, pos, live_premium, time_held_mins):
-        """PR 3: position-management exits beyond static SL/TP/theta-shield.
+        """Position-management exits beyond static SL/TP.
 
-        Three independent triggers, ordered by signal strength:
-          1. PCR shift exit — entry-time PCR moved >0.10 against the trade
-             (CE: PCR collapsed; PE: PCR rallied). Means the directional
-             flow that justified the entry has reversed.
-          2. Adverse OI exit — focus-zone OI built up against position
-             >8% (CE: call writers stacking; PE: put writers stacking).
-          3. Time-stop scaling — at <0.5% profit after 30 minutes, exit.
-             Theta is now eating us; no edge realised.
+        Exit triggers (first to fire wins):
+          1. ZONE TARGET — spot reached the opposite S/R boundary.
+             CE: spot near resistance → take profit.
+             PE: spot near support → take profit.
+          2. ZONE INVALIDATION — spot broke through the defending wall.
+             CE: spot dropped below support → cut loss.
+             PE: spot rose above resistance → cut loss.
+          3. THETA / SIDEWAYS GUARD — held too long with no directional
+             progress. Spot hasn't moved >0.15% toward target after 45 min
+             → theta is eating us, exit.
+          4. PCR shift exit — entry-time PCR moved >0.10 against the trade
+             AND spot confirms reversal (legacy, kept as safety net).
+          5. Adverse OI exit — focus-zone OI built up against position >8%
+             AND spot confirms reversal (legacy).
+          6. Time-stop scaling — at <0.5% profit after time_stop_minutes,
+             exit (legacy).
 
         Returns: exit_reason string, or None if no trigger fires.
         """
         direction = pos.get('opt_type')
+        entry_spot = float(pos.get('entry_spot', 0) or 0)
+
+        try:
+            cur_spot = float(self.fetcher.get_spot() or 0)
+        except Exception:
+            cur_spot = 0.0
+
+        sup = self.fetcher.get_support()
+        res = self.fetcher.get_resistance()
+
+        # ── TRIGGER 1: Zone Target ──────────────────────────────────────
+        # CE: spot near resistance → profit target reached.
+        # PE: spot near support → profit target reached.
+        # "Near" = within 0.15% of the boundary.
+        if entry_spot > 0 and cur_spot > 0 and sup > 0 and res > 0:
+            zone_proximity_pct = 0.0015  # 0.15%
+            if direction == 'CE':
+                dist_to_res = abs(cur_spot - res) / cur_spot
+                if dist_to_res <= zone_proximity_pct:
+                    return (f"ZONE TARGET HIT ({direction}: "
+                            f"spot {cur_spot:.0f} at resistance {res}, "
+                            f"entry {entry_spot:.0f})")
+            else:  # PE
+                dist_to_sup = abs(cur_spot - sup) / cur_spot
+                if dist_to_sup <= zone_proximity_pct:
+                    return (f"ZONE TARGET HIT ({direction}: "
+                            f"spot {cur_spot:.0f} at support {sup}, "
+                            f"entry {entry_spot:.0f})")
+
+        # ── TRIGGER 2: Zone Invalidation ────────────────────────────────
+        # CE: spot broke below support → the floor is gone, get out.
+        # PE: spot broke above resistance → the ceiling broke, get out.
+        # Note: 15% SL should fire BEFORE this on most losing trades.
+        # Zone-inv is the last-resort safety net.
+        if entry_spot > 0 and cur_spot > 0 and sup > 0 and res > 0:
+            if direction == 'CE' and cur_spot < sup:
+                return (f"ZONE INVALIDATED ({direction}: "
+                        f"spot {cur_spot:.0f} broke support {sup})")
+            if direction == 'PE' and cur_spot > res:
+                return (f"ZONE INVALIDATED ({direction}: "
+                        f"spot {cur_spot:.0f} broke resistance {res})")
+
+        # ── TRIGGER 3: Theta / Sideways Guard ───────────────────────────
+        # If we've held for 45+ minutes and spot hasn't moved at least
+        # 0.15% toward the target, theta decay is eating premium with
+        # no directional edge — exit.
+        if entry_spot > 0 and cur_spot > 0 and time_held_mins >= 45:
+            if direction == 'CE':
+                progress_pct = (cur_spot - entry_spot) / entry_spot
+            else:
+                progress_pct = (entry_spot - cur_spot) / entry_spot
+            if progress_pct < 0.0015:  # less than 0.15% progress
+                return (f"THETA GUARD ({time_held_mins:.0f}m: "
+                        f"spot moved {progress_pct*100:.2f}% toward target, "
+                        f"below 0.15% — sideways chop)")
+
+        # ── TRIGGER 4: PCR shift (legacy, with spot confirmation) ──────
+        spot_known = entry_spot > 0 and cur_spot > 0
+        if direction == 'CE':
+            spot_confirms_reversal = (not spot_known) or cur_spot < entry_spot
+        else:
+            spot_confirms_reversal = (not spot_known) or cur_spot > entry_spot
+
         thr = self.pcr_shift_exit_threshold
-        # Trigger 1: PCR shift
         try:
             entry_pcr = float(pos.get('entry_pcr', 0) or 0)
             cur_pcr = float(self.fetcher.get_focus_pcr() or 0)
             if entry_pcr > 0 and cur_pcr > 0:
                 shift = cur_pcr - entry_pcr
-                if direction == 'CE' and shift <= -thr:
-                    return f"PCR SHIFT EXIT (CE: {entry_pcr:.2f} -> {cur_pcr:.2f}, delta {shift:+.2f})"
-                if direction == 'PE' and shift >= thr:
-                    return f"PCR SHIFT EXIT (PE: {entry_pcr:.2f} -> {cur_pcr:.2f}, delta {shift:+.2f})"
+                fired = (direction == 'CE' and shift <= -thr) or \
+                        (direction == 'PE' and shift >= thr)
+                if fired and spot_confirms_reversal:
+                    spot_tag = (f" spot {entry_spot:.0f}->{cur_spot:.0f}"
+                                if spot_known else "")
+                    return (f"PCR SHIFT EXIT ({direction}: "
+                            f"{entry_pcr:.2f} -> {cur_pcr:.2f}, "
+                            f"delta {shift:+.2f}){spot_tag}")
         except Exception:
             pass
 
-        # Trigger 2: adverse OI build during hold
+        # ── TRIGGER 5: adverse OI build (legacy, with spot confirmation)
         try:
             entry_ce = float(pos.get('entry_total_ce_oi', 0) or 0)
             entry_pe = float(pos.get('entry_total_pe_oi', 0) or 0)
@@ -579,16 +888,22 @@ class LiveOrchestrator:
             cur_pe = float(cur_oi.get('total_pe_oi', 0) or 0)
             if direction == 'CE' and entry_ce > 0 and cur_ce > 0:
                 growth = (cur_ce - entry_ce) / entry_ce
-                if growth >= self.adverse_oi_growth_exit_pct:
-                    return f"ADVERSE OI EXIT (CE OI grew {growth*100:+.1f}% - call writers stacking)"
+                if growth >= self.adverse_oi_growth_exit_pct and spot_confirms_reversal:
+                    spot_tag = (f" spot {entry_spot:.0f}->{cur_spot:.0f}"
+                                if spot_known else "")
+                    return (f"ADVERSE OI EXIT (CE OI grew {growth*100:+.1f}% "
+                            f"- call writers stacking){spot_tag}")
             if direction == 'PE' and entry_pe > 0 and cur_pe > 0:
                 growth = (cur_pe - entry_pe) / entry_pe
-                if growth >= self.adverse_oi_growth_exit_pct:
-                    return f"ADVERSE OI EXIT (PE OI grew {growth*100:+.1f}% - put writers stacking)"
+                if growth >= self.adverse_oi_growth_exit_pct and spot_confirms_reversal:
+                    spot_tag = (f" spot {entry_spot:.0f}->{cur_spot:.0f}"
+                                if spot_known else "")
+                    return (f"ADVERSE OI EXIT (PE OI grew {growth*100:+.1f}% "
+                            f"- put writers stacking){spot_tag}")
         except Exception:
             pass
 
-        # Trigger 3: time-stop scaling - break-even-ish after time_stop_minutes
+        # ── TRIGGER 6: time-stop scaling (legacy) ───────────────────────
         try:
             entry_price = float(pos.get('entry_price', 0) or 0)
             if entry_price > 0 and time_held_mins >= self.time_stop_minutes:
@@ -601,12 +916,117 @@ class LiveOrchestrator:
 
         return None
 
+    def _partial_close(self, pos, exit_price, lots_to_sell, reason):
+        """Close a portion of the open position (tiered profit booking)."""
+        entry_price = pos['entry_price']
+        qty = lots_to_sell * self.lot_size
+        pnl = (exit_price - entry_price) * qty - 40.0  # reduced brokerage for partial
+
+        self.portfolio["capital"] += pnl
+
+        exit_time = datetime.now(IST)
+        record = {
+            "entry_time": pos['entry_time'],
+            "exit_time": exit_time.isoformat(),
+            "trade_type": f"{pos['trade_type']} (partial {lots_to_sell}/{pos.get('total_lots',5)} lots)",
+            "strike": pos['strike'],
+            "entry_price": entry_price,
+            "exit_price": exit_price,
+            "pnl": pnl,
+            "reason": reason
+        }
+        self.portfolio["trade_history"].append(record)
+        self.save_portfolio()
+
+        # Journal: record exit for these lots
+        if self.journal is not None and self._journal_day_started:
+            try:
+                tactic_name = pos.get('tactic_name', 'oi_wall_mean_reversion')
+                self.journal.on_exit(
+                    tactic_name, exit_time, exit_price,
+                    pnl, reason,
+                    {k: pos.get(k) for k in ('entry_spot', 'entry_pcr', 'strike', 'opt_type')},
+                )
+            except Exception as e:
+                logger.debug(f"Journal on_exit (partial) failed: {e}")
+
+        # Telegram
+        msg = (f"💰 PARTIAL EXIT ({reason})\n"
+               f"{pos['strike']} {pos['opt_type']}: Rs.{entry_price:.2f} → Rs.{exit_price:.2f}\n"
+               f"Lots sold: {lots_to_sell}/{pos.get('total_lots',5)} | P&L: Rs.{pnl:+,.0f}\n"
+               f"Remaining: {pos.get('remaining_lots', 0) - lots_to_sell} lots")
+        logger.info(msg)
+        self.telegram.send_message(msg)
+
+    def _reassess_market(self, now):
+        """Called after SL cooldown expires. Checks S/R, OI, trend.
+        Returns {"can_trade": bool, "reason": str}."""
+        try:
+            spot = self.fetcher.get_spot()
+            sup = self.fetcher.get_support()
+            res = self.fetcher.get_resistance()
+            focus_pcr = self.fetcher.get_focus_pcr()
+            oi = self.fetcher.get_oi_pattern() or {}
+
+            if spot <= 0 or sup <= 0 or res <= 0:
+                return {"can_trade": False, "reason": "stale data"}
+
+            reasons = []
+
+            # 1. Check: Are S/R zones wide enough to trade?
+            zone_width_pct = (res - sup) / spot
+            if zone_width_pct < 0.003:  # < 0.3% = too narrow
+                reasons.append(f"zone too narrow ({zone_width_pct*100:.1f}%)")
+
+            # 2. Check: Is OI giving clear direction?
+            ce_chg = abs(float(oi.get("ce_oi_change", 0) or 0))
+            pe_chg = abs(float(oi.get("pe_oi_change", 0) or 0))
+            if ce_chg > 0 and pe_chg > 0:
+                ratio = pe_chg / ce_chg
+                if ratio >= 1.20:
+                    reasons.append(f"OI bullish (PE/CE={ratio:.2f}x)")
+                elif ratio <= 0.80:
+                    reasons.append(f"OI bearish (PE/CE={ratio:.2f}x)")
+                else:
+                    reasons.append(f"OI neutral (PE/CE={ratio:.2f}x)")
+            else:
+                reasons.append("OI flows unclear")
+
+            # 3. Check: Is PCR giving clear signal?
+            if focus_pcr >= 1.05:
+                reasons.append(f"PCR bullish ({focus_pcr:.2f})")
+            elif focus_pcr <= 0.90:
+                reasons.append(f"PCR bearish ({focus_pcr:.2f})")
+            else:
+                reasons.append(f"PCR neutral ({focus_pcr:.2f})")
+
+            # 4. Check: Is spot near either wall? (opportunity exists)
+            dist_sup = abs(spot - sup) / spot
+            dist_res = abs(res - spot) / spot
+            near_wall = (dist_sup <= 0.003 or dist_res <= 0.003)
+            if not near_wall:
+                reasons.append(f"spot mid-zone (S={sup}, R={res}, spot={spot:.0f})")
+
+            # Decision: can trade if at least 2 positive signals and no blockers
+            positive_signals = sum(1 for r in reasons if "bullish" in r.lower() or "bearish" in r.lower())
+            has_blocker = any("unclear" in r.lower() or "neutral" in r.lower() or "narrow" in r.lower())
+
+            if has_blocker and positive_signals < 1:
+                return {"can_trade": False, "reason": "; ".join(reasons)}
+
+            return {"can_trade": True, "reason": f"resume: {'; '.join(reasons)}"}
+        except Exception as e:
+            return {"can_trade": False, "reason": f"reassess error: {e}"}
+
     def _close_position(self, reason, exit_price=None):
         pos = self.portfolio["open_position"]
         if exit_price is None:
             exit_price = self.fetcher.get_option_ltp(pos['strike'], pos['opt_type'])
 
-        pnl = (exit_price - pos['entry_price']) * pos['qty']
+        # Use remaining lots (after any partial exits)
+        remaining = pos.get('remaining_lots', pos.get('total_lots', 5))
+        qty = remaining * self.lot_size
+        pnl = (exit_price - pos['entry_price']) * qty
 
         # Deduct Brokerage (Paper)
         pnl -= 60.0
@@ -617,7 +1037,7 @@ class LiveOrchestrator:
         record = {
             "entry_time": pos['entry_time'],
             "exit_time": exit_time.isoformat(),
-            "trade_type": pos['trade_type'],
+            "trade_type": f"{pos['trade_type']} (final {remaining} lots)",
             "strike": pos['strike'],
             "entry_price": pos['entry_price'],
             "exit_price": exit_price,
@@ -938,6 +1358,357 @@ class LiveOrchestrator:
         logger.info(msg)
         self.telegram.send_message(msg)
 
+    # ===================================================================
+    # Seller bot: Iron Condor entry / monitor / close (added 2026-05-17).
+    # Standalone flow — runs only when config.seller_mode == True. Skips
+    # all single-leg and straddle paths. Uses the regime classifier (via
+    # self.dispatcher.classifier._current) for entry gating but does NOT
+    # use the dispatcher's tactic routing — seller bot has exactly one
+    # tactic (Iron Condor) for v1.
+    # ===================================================================
+
+    def _scan_for_iron_condor_entry(self, now: datetime) -> None:
+        """Look for Iron Condor entry conditions:
+          1. Regime classifier verdict is RANGE (or CHOP, configurable)
+          2. Inside the seller entry window (default 10:30-13:30 IST)
+          3. ATM CE+PE premiums available for the candidate strikes
+          4. Net credit >= configured minimum
+        """
+        strat = self.config.get("seller_strategy", {})
+        gates = self.config.get("seller_entry_gates", {})
+
+        # Window check
+        t_now = now.time()
+        no_before = dtime.fromisoformat(strat.get("no_entry_before", "10:30:00"))
+        no_after = dtime.fromisoformat(strat.get("no_entry_after", "13:30:00"))
+        if t_now < no_before or t_now >= no_after:
+            return
+
+        # Regime check — needs the classifier to evaluate the latest tick
+        required_regime = gates.get("require_regime", "RANGE")
+        cur_regime = None
+        try:
+            cur_regime = self.dispatcher.update_and_get_regime(now, self.fetcher)
+        except Exception as e:
+            logger.debug(f"[SELLER] Regime classification failed: {e}")
+        # Accept both RANGE and CHOP as eligible for IC (low directional bias)
+        eligible_regimes = {required_regime, "CHOP"}
+        if cur_regime not in eligible_regimes:
+            logger.info(
+                f"[SELLER] Skip entry: regime={cur_regime} not in "
+                f"{eligible_regimes}. Spot={self.fetcher.get_spot():.1f}"
+            )
+            return
+
+        # VIX gate — added 2026-05-17 after proxy backtest showed High-VIX
+        # days (VIX > 16) had a 52% breach rate vs 21% Normal / 1% Low.
+        # The asymmetric payoff means even a 50% breach rate destroys edge.
+        max_vix = float(gates.get("max_vix_for_entry", 16.0))
+        try:
+            cur_vix = float(self.fetcher.get_india_vix() or 0)
+        except Exception:
+            cur_vix = 0.0
+        if cur_vix > 0 and cur_vix > max_vix:
+            logger.info(
+                f"[SELLER] Skip entry: VIX={cur_vix:.2f} above max {max_vix:.2f}. "
+                f"High-VIX environment = high breach risk for IC."
+            )
+            return
+
+        spot = self.fetcher.get_spot()
+        if spot <= 0:
+            return
+
+        # Strike selection — short strikes at +/- distance from ATM,
+        # long strikes wing_width further out.
+        atm_strike = int(round(spot / self.strike_step) * self.strike_step)
+        wing_width = int(strat.get("wing_width_pts", 100))
+        short_dist = int(strat.get("short_strike_distance_pts", 200))
+
+        ce_short_strike = atm_strike + short_dist
+        ce_long_strike = ce_short_strike + wing_width
+        pe_short_strike = atm_strike - short_dist
+        pe_long_strike = pe_short_strike - wing_width
+
+        # Pull live LTPs for all four legs
+        ce_short_prem = self.fetcher.get_option_ltp(ce_short_strike, "CE")
+        ce_long_prem = self.fetcher.get_option_ltp(ce_long_strike, "CE")
+        pe_short_prem = self.fetcher.get_option_ltp(pe_short_strike, "PE")
+        pe_long_prem = self.fetcher.get_option_ltp(pe_long_strike, "PE")
+
+        if min(ce_short_prem, ce_long_prem, pe_short_prem, pe_long_prem) <= 0:
+            logger.info(
+                f"[SELLER] Skip entry: premium unavailable for one or more legs "
+                f"(CE {ce_short_strike}={ce_short_prem}, {ce_long_strike}={ce_long_prem}, "
+                f"PE {pe_short_strike}={pe_short_prem}, {pe_long_strike}={pe_long_prem})"
+            )
+            return
+
+        # Net credit per lot (premium collected from shorts minus premium paid for longs)
+        net_credit = (ce_short_prem - ce_long_prem) + (pe_short_prem - pe_long_prem)
+        min_credit = float(strat.get("min_net_credit_per_lot", 15.0))
+        if net_credit < min_credit:
+            logger.info(
+                f"[SELLER] Skip entry: net credit Rs.{net_credit:.2f} below min "
+                f"Rs.{min_credit}. CE side={ce_short_prem - ce_long_prem:.2f}, "
+                f"PE side={pe_short_prem - pe_long_prem:.2f}"
+            )
+            return
+
+        # All checks pass — open the position
+        self._open_iron_condor_position(
+            now=now,
+            spot=spot,
+            atm_strike=atm_strike,
+            wing_width=wing_width,
+            ce_short_strike=ce_short_strike, ce_short_entry=ce_short_prem,
+            ce_long_strike=ce_long_strike, ce_long_entry=ce_long_prem,
+            pe_short_strike=pe_short_strike, pe_short_entry=pe_short_prem,
+            pe_long_strike=pe_long_strike, pe_long_entry=pe_long_prem,
+            net_credit=net_credit,
+            regime=cur_regime,
+        )
+
+    def _open_iron_condor_position(self, now, spot, atm_strike, wing_width,
+                                    ce_short_strike, ce_short_entry,
+                                    ce_long_strike, ce_long_entry,
+                                    pe_short_strike, pe_short_entry,
+                                    pe_long_strike, pe_long_entry,
+                                    net_credit, regime) -> None:
+        """Open a 4-leg Iron Condor position. Paper-mode only for v1."""
+        strat = self.config.get("seller_strategy", {})
+        risk = self.config.get("risk", {})
+        lots = int(risk.get("max_lots_per_trade", 1))
+        qty_per_leg = lots * self.lot_size
+
+        # Max loss per lot = wing_width - net_credit (defined-risk property of IC)
+        max_loss = wing_width - net_credit
+        max_profit = net_credit
+        profit_target_pct = float(strat.get("profit_target_pct", 0.50))
+        sl_multiplier = float(strat.get("stop_loss_multiplier", 1.5))
+        # The "combined" we track is total close-cost. At entry, close-cost = net_credit.
+        # We profit when close_cost shrinks below net_credit. Hit profit target when
+        # close_cost <= net_credit * (1 - profit_target_pct).
+        # We stop out when close_cost >= net_credit * (1 + sl_multiplier).
+        profit_target_close_cost = net_credit * (1 - profit_target_pct)
+        stop_loss_close_cost = net_credit * (1 + sl_multiplier)
+
+        self.portfolio["open_iron_condor"] = {
+            "entry_time": now.isoformat(),
+            "tactic_name": strat.get("tactic", "iron_condor_v1"),
+            "spot_at_entry": float(spot),
+            "atm_strike": int(atm_strike),
+            "wing_width": int(wing_width),
+            "regime_at_entry": regime,
+            # Four legs
+            "ce_short_strike": int(ce_short_strike),
+            "ce_short_entry": float(ce_short_entry),
+            "ce_long_strike": int(ce_long_strike),
+            "ce_long_entry": float(ce_long_entry),
+            "pe_short_strike": int(pe_short_strike),
+            "pe_short_entry": float(pe_short_entry),
+            "pe_long_strike": int(pe_long_strike),
+            "pe_long_entry": float(pe_long_entry),
+            # Per-lot economics
+            "net_credit": float(net_credit),
+            "max_loss": float(max_loss),
+            "max_profit": float(max_profit),
+            "profit_target_close_cost": float(profit_target_close_cost),
+            "stop_loss_close_cost": float(stop_loss_close_cost),
+            # Sizing
+            "lots": int(lots),
+            "qty_per_leg": int(qty_per_leg),
+            # Force-close time
+            "force_close_time": strat.get("force_close_time", "15:15:00"),
+        }
+        self.save_portfolio()
+
+        logger.info(
+            f"[IC OPENED] regime={regime} spot={spot:.1f} ATM={atm_strike} "
+            f"wing={wing_width}\n"
+            f"  CE: short {ce_short_strike}@{ce_short_entry:.2f} / "
+            f"long {ce_long_strike}@{ce_long_entry:.2f}\n"
+            f"  PE: short {pe_short_strike}@{pe_short_entry:.2f} / "
+            f"long {pe_long_strike}@{pe_long_entry:.2f}\n"
+            f"  Net credit: Rs.{net_credit:.2f}/lot (lots={lots}, qty/leg={qty_per_leg})\n"
+            f"  Max profit: Rs.{max_profit:.2f}/lot | Max loss: Rs.{max_loss:.2f}/lot\n"
+            f"  Exits: TP at close-cost <= Rs.{profit_target_close_cost:.2f} "
+            f"({profit_target_pct*100:.0f}% of credit); "
+            f"SL at close-cost >= Rs.{stop_loss_close_cost:.2f} "
+            f"({sl_multiplier:.1f}x credit)"
+        )
+        if self.telegram is not None:
+            try:
+                self.telegram.send_message(
+                    f"[IC OPENED]\n"
+                    f"Regime: {regime}, Spot: {spot:.1f}\n"
+                    f"Range: {pe_long_strike}-{ce_long_strike}\n"
+                    f"Net credit: Rs.{net_credit:.2f}/lot ({lots} lots)\n"
+                    f"Max profit: Rs.{max_profit*qty_per_leg:.0f} | "
+                    f"Max loss: Rs.{max_loss*qty_per_leg:.0f}"
+                )
+            except Exception:
+                pass
+
+    def _monitor_iron_condor(self, now: datetime) -> None:
+        """Per-tick check on open IC. Closes on TP / SL / force-close time
+        / regime flip to TREND."""
+        ic = self.portfolio.get("open_iron_condor")
+        if not ic:
+            return
+
+        # Force close at end-of-day window
+        force_close_time = dtime.fromisoformat(ic.get("force_close_time", "15:15:00"))
+        if now.time() >= force_close_time:
+            self._close_iron_condor(f"EOD Force Close ({force_close_time})")
+            return
+
+        # Pull current premiums for all four legs
+        ce_short_now = self.fetcher.get_option_ltp(ic["ce_short_strike"], "CE")
+        ce_long_now = self.fetcher.get_option_ltp(ic["ce_long_strike"], "CE")
+        pe_short_now = self.fetcher.get_option_ltp(ic["pe_short_strike"], "PE")
+        pe_long_now = self.fetcher.get_option_ltp(ic["pe_long_strike"], "PE")
+        if min(ce_short_now, ce_long_now, pe_short_now, pe_long_now) <= 0:
+            return  # stale data, skip
+
+        # Close-cost is what we'd pay to unwind the position right now.
+        # = (buy back CE short) - (sell CE long) + (buy back PE short) - (sell PE long)
+        close_cost = (ce_short_now - ce_long_now) + (pe_short_now - pe_long_now)
+
+        # Profit target — close-cost shrunk to <= profit_target threshold
+        if close_cost <= ic["profit_target_close_cost"]:
+            self._close_iron_condor(
+                f"PROFIT TARGET (close-cost {close_cost:.2f} <= "
+                f"{ic['profit_target_close_cost']:.2f})",
+                close_premiums=(ce_short_now, ce_long_now, pe_short_now, pe_long_now),
+            )
+            return
+
+        # Stop loss — close-cost ballooned past threshold
+        if close_cost >= ic["stop_loss_close_cost"]:
+            self._close_iron_condor(
+                f"STOP LOSS (close-cost {close_cost:.2f} >= "
+                f"{ic['stop_loss_close_cost']:.2f})",
+                close_premiums=(ce_short_now, ce_long_now, pe_short_now, pe_long_now),
+            )
+            return
+
+        # Regime flip exit — if classifier moves to a TREND regime, the
+        # range thesis is broken; bail out.
+        try:
+            cur_regime_obj = self.dispatcher.classifier._current
+            cur_regime = cur_regime_obj.value if cur_regime_obj else None
+            if cur_regime in ("TREND_UP", "TREND_DOWN",
+                              "TREND_UP_GAP", "TREND_DOWN_GAP"):
+                self._close_iron_condor(
+                    f"REGIME FLIP to {cur_regime} (range thesis broken)",
+                    close_premiums=(ce_short_now, ce_long_now,
+                                    pe_short_now, pe_long_now),
+                )
+                return
+        except Exception:
+            pass
+
+        # Periodic status log (every minute on the round-second)
+        if now.second < 4:
+            pnl_per_lot = ic["net_credit"] - close_cost
+            pnl_total = pnl_per_lot * ic["qty_per_leg"]
+            logger.info(
+                f"[IC HOLDING] close_cost=Rs.{close_cost:.2f} "
+                f"(entry credit Rs.{ic['net_credit']:.2f}) → "
+                f"P&L Rs.{pnl_total:+.0f} | Spot {self.fetcher.get_spot():.1f}"
+            )
+
+    def _close_iron_condor(self, reason: str,
+                            close_premiums=None) -> None:
+        """Close all 4 legs of the IC. close_premiums is an optional
+        (ce_short, ce_long, pe_short, pe_long) tuple; if not supplied,
+        re-fetches them.
+        """
+        ic = self.portfolio.get("open_iron_condor")
+        if not ic:
+            return
+
+        if close_premiums is None:
+            ce_short_now = self.fetcher.get_option_ltp(ic["ce_short_strike"], "CE") \
+                or ic["ce_short_entry"]
+            ce_long_now = self.fetcher.get_option_ltp(ic["ce_long_strike"], "CE") \
+                or ic["ce_long_entry"]
+            pe_short_now = self.fetcher.get_option_ltp(ic["pe_short_strike"], "PE") \
+                or ic["pe_short_entry"]
+            pe_long_now = self.fetcher.get_option_ltp(ic["pe_long_strike"], "PE") \
+                or ic["pe_long_entry"]
+        else:
+            ce_short_now, ce_long_now, pe_short_now, pe_long_now = close_premiums
+
+        qty = ic["qty_per_leg"]
+        # Per-leg P&L:
+        #   Short legs: P&L = (entry - now) * qty   (profit when premium drops)
+        #   Long legs:  P&L = (now - entry) * qty   (profit when premium rises)
+        ce_short_pnl = (ic["ce_short_entry"] - ce_short_now) * qty
+        ce_long_pnl = (ce_long_now - ic["ce_long_entry"]) * qty
+        pe_short_pnl = (ic["pe_short_entry"] - pe_short_now) * qty
+        pe_long_pnl = (pe_long_now - ic["pe_long_entry"]) * qty
+        gross_pnl = ce_short_pnl + ce_long_pnl + pe_short_pnl + pe_long_pnl
+        # Brokerage: 4 legs round-trip = 8 orders. Match buyer paper rate
+        # Rs.30/leg from config.slippage.brokerage_per_leg.
+        brokerage = float(
+            self.config.get("slippage", {}).get("brokerage_per_leg", 30)
+        ) * 8
+        net_pnl = gross_pnl - brokerage
+        self.portfolio["capital"] += net_pnl
+
+        exit_time = datetime.now(IST)
+        # Record each leg as a trade_history entry for compatibility with
+        # the dashboard TradesTable + downstream P&L calculations.
+        for leg_name, strike, entry_prem, exit_prem, leg_pnl in (
+            ("SELL CE (IC short)", ic["ce_short_strike"], ic["ce_short_entry"],
+             ce_short_now, ce_short_pnl),
+            ("BUY CE (IC long)",   ic["ce_long_strike"], ic["ce_long_entry"],
+             ce_long_now, ce_long_pnl),
+            ("SELL PE (IC short)", ic["pe_short_strike"], ic["pe_short_entry"],
+             pe_short_now, pe_short_pnl),
+            ("BUY PE (IC long)",   ic["pe_long_strike"], ic["pe_long_entry"],
+             pe_long_now, pe_long_pnl),
+        ):
+            self.portfolio["trade_history"].append({
+                "entry_time": ic["entry_time"],
+                "exit_time": exit_time.isoformat(),
+                "trade_type": leg_name,
+                "strike": strike,
+                "entry_price": entry_prem,
+                "exit_price": exit_prem,
+                "pnl": leg_pnl - (brokerage / 4),  # Allocate brokerage evenly
+                "reason": reason,
+            })
+
+        logger.info(
+            f"[IC CLOSED] reason={reason}\n"
+            f"  CE short {ic['ce_short_strike']}: "
+            f"{ic['ce_short_entry']:.2f} → {ce_short_now:.2f}  P&L Rs.{ce_short_pnl:+,.0f}\n"
+            f"  CE long  {ic['ce_long_strike']}: "
+            f"{ic['ce_long_entry']:.2f} → {ce_long_now:.2f}  P&L Rs.{ce_long_pnl:+,.0f}\n"
+            f"  PE short {ic['pe_short_strike']}: "
+            f"{ic['pe_short_entry']:.2f} → {pe_short_now:.2f}  P&L Rs.{pe_short_pnl:+,.0f}\n"
+            f"  PE long  {ic['pe_long_strike']}: "
+            f"{ic['pe_long_entry']:.2f} → {pe_long_now:.2f}  P&L Rs.{pe_long_pnl:+,.0f}\n"
+            f"  Gross P&L Rs.{gross_pnl:+,.0f} − brokerage Rs.{brokerage:.0f} = "
+            f"Net Rs.{net_pnl:+,.0f}"
+        )
+        if self.telegram is not None:
+            try:
+                tag = "[WIN]" if net_pnl > 0 else "[LOSS]"
+                self.telegram.send_message(
+                    f"{tag} IRON CONDOR CLOSED\n"
+                    f"Reason: {reason}\n"
+                    f"Net P&L: Rs.{net_pnl:+,.0f}"
+                )
+            except Exception:
+                pass
+
+        self.portfolio["open_iron_condor"] = None
+        self.save_portfolio()
+
     # --- Journal day lifecycle -----------------------------------------
 
     def _maybe_start_journal_day(self, now: datetime) -> None:
@@ -1040,6 +1811,11 @@ class LiveOrchestrator:
                 "missed_today_count": n_missed,
                 "is_market_open": is_market_open,
                 "journal_day_started": self._journal_day_started,
+                # 2026-05-17 new signals
+                "trend_confidence": float(snap.get("trend_confidence", 0) or 0),
+                "trend_direction": snap.get("trend_direction", "FLAT"),
+                "rejection_at_high": int(snap.get("rejection_at_high", 0) or 0),
+                "rejection_at_low": int(snap.get("rejection_at_low", 0) or 0),
             }
             self.state_publisher.write_engine_state(engine_state)
 
@@ -1114,7 +1890,7 @@ class LiveOrchestrator:
                 except Exception as e:
                     logger.debug(f"analyze_trade failed: {e}")
             out_dir = Path("reports/journal")
-            path = write_daily_report(day_record, out_dir)
+            path = write_daily_report(day_record, out_dir, index_name=self.config.get("trading_index", "NIFTY"))
             logger.info(f"[JOURNAL] Wrote {path}")
             self._journal_day_started = False
         except Exception as e:

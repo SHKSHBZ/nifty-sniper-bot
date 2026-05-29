@@ -20,7 +20,9 @@ import type {
   PortfolioStats, BotStatus, BotName,
 } from "@/types";
 
-const BOT_LIST: BotName[] = ["NIFTY", "SENSEX", "NIFTY_REGIME", "SENSEX_REGIME", "NIFTY_T1", "NIFTY_T2"];
+// Active bots first (Recommended for live), retired lab bots last.
+// NIFTY_SELLER added 2026-05-17 — runs Iron Condor on RANGE days.
+const BOT_LIST: BotName[] = ["NIFTY_REGIME", "SENSEX_REGIME", "NIFTY_SELLER", "NIFTY", "SENSEX", "NIFTY_T1", "NIFTY_T2"];
 type Tab = "live" | "control" | "logs" | "trades";
 
 export default function Dashboard() {

@@ -194,7 +194,7 @@ def smoke_one_day(day: date, mode: str) -> dict:
 def main():
     # Pick 2 days from the cached data — pick days that had signals in
     # earlier phases so the test is representative.
-    test_days = [date(2025, 11, 26), date(2026, 4, 21)]
+    test_days = [date(2026, 5, 18), date(2026, 5, 19), date(2026, 5, 21)]
 
     print("=" * 60)
     print("SMOKE TEST — TacticDispatcher + Journal end-to-end")

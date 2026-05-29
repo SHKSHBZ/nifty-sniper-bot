@@ -27,13 +27,13 @@ from journal.models import JournalDay, ExecutedTrade, MissedEntry
 # Public API
 # ---------------------------------------------------------------------------
 
-def write_daily_report(day: JournalDay, output_dir: Path) -> Path:
+def write_daily_report(day: JournalDay, output_dir: Path, index_name: str = "NIFTY") -> Path:
     """Write the day's journal as a set of CSV files. Returns the path of
     the trades CSV (the primary artifact). Empty sections still get a
     header-only CSV so downstream tooling has a stable file layout."""
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    base = f"journal_{day.day.isoformat()}"
+    base = f"journal_{index_name}_{day.day.isoformat()}"
 
     summary_path = output_dir / f"{base}_summary.csv"
     trades_path = output_dir / f"{base}_trades.csv"

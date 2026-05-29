@@ -1,0 +1,83 @@
+{
+    "project_name": "NiftySensex_Weekly_Options_Buyer_Bot",
+    "version": "2.0.0",
+    "trading_index": "NIFTY",
+    "focus_zone_writer": false,
+    "environment": {
+        "local_inference_url": "http://localhost:11434",
+        "local_model": "qwen3:32b-coder",
+        "external_ai_provider": "gemini",
+        "external_ai_model": "gemini-2.0-flash",
+        "broker_api": "Upstox-v2"
+    },
+    "risk": {
+        "max_daily_loss_inr": 5000,
+        "per_trade_sl_pct": 20,
+        "per_trade_target_pct": 50,
+        "risk_per_trade_pct": 1.0,
+        "order_type": "LIMIT",
+        "limit_buffer_pct": 0.5
+    },
+    "strategy": {
+        "name": "options_buying_with_optional_hedging",
+        "timeframes": ["5min", "15min"],
+        "min_signal_score": 3,
+        "candle_timeframe_minutes": 5,
+        "nifty_strike_step": 50,
+        "sensex_strike_step": 100,
+        "nifty_lot_size": 65,
+        "sensex_lot_size": 20,
+        "min_premium": 30.0,
+        "atr_threshold": 6.0,
+        "time_gate": "10:00:00",
+        "time_exit": "14:30:00",
+        "eod_exit": "15:20:00"
+    },
+    "dte_risk": {
+        "extreme_threshold": 3,
+        "high_threshold": 7,
+        "expiry_day_size_reduction": 0.50
+    },
+    "hedging": {
+        "enabled": true,
+        "mode": "debit_spread_on_extreme_dte",
+        "spread_strike_gap": 50
+    },
+    "iv_filter": {
+        "enabled": true,
+        "max_iv_percentile": 50
+    },
+    "oi_analysis": {
+        "focus_zone_strikes": 7,
+        "pcr_bullish_threshold": 1.0,
+        "pcr_bearish_threshold": 0.8,
+        "pcr_contrarian_upper": 1.5,
+        "pcr_contrarian_lower": 0.7
+    },
+    "slippage": {
+        "entry_pct": 1.5,
+        "exit_pct": 1.5,
+        "brokerage_per_leg": 30
+    },
+    "alerts": {
+        "telegram_enabled": true,
+        "log_full_reasoning": true
+    },
+    "engine_mode": "regime",
+    "_engine_mode_help": "regime = TacticDispatcher routes between OI-Wall MR / Trend Pullback / Bullish-Bearish ORB based on classifier. Used for parallel comparison vs legacy.",
+    "journal_enabled": true,
+    "modes": {
+        "paper_trade": true,
+        "backtest": true,
+        "live": false
+    },
+    "modules": [
+        "signal_engine.py",
+        "spread_executor.py",
+        "data_fetcher.py",
+        "order_executor.py",
+        "backtest_v2.py",
+        "historical_downloader_plus.py",
+        "telegram_notifier.py"
+    ]
+}

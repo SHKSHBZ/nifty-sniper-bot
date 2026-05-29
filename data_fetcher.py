@@ -7,7 +7,7 @@ import os
 import upstox_client
 from collections import deque
 from datetime import datetime, timedelta
-from regime.market_hours import IST
+from regime.market_hours import IST, MARKET_OPEN, MARKET_CLOSE
 
 logger = logging.getLogger("DataFetcher")
 
@@ -71,7 +71,7 @@ class DataFetcher:
         params = {"instrument_key": self.instrument_key}
         headers = {"Authorization": f"Bearer {self.access_token}", "Accept": "application/json"}
         try:
-            resp = self.session.get(url, params=params, headers=headers, timeout=5)
+            resp = self.session.get(url, params=params, headers=headers, timeout=15)
             if resp.status_code == 200:
                 data = resp.json().get("data", [])
                 expiries = {item.get("expiry") for item in data if item.get("expiry")}
@@ -83,8 +83,8 @@ class DataFetcher:
                         dt = datetime.strptime(e, "%Y-%m-%d").date()
                         # Valid if future, or if today and market is still open (< 15:30)
                         if dt > today or (dt == today and datetime.now().hour < 16):
-                            valid_expiries.append(dt)
-                            
+                             valid_expiries.append(dt)
+                             
                     if valid_expiries:
                         return min(valid_expiries).strftime("%Y-%m-%d")
         except Exception as e:
@@ -92,8 +92,8 @@ class DataFetcher:
 
         # Math Fallback (If API Call Fails)
         today = datetime.now().date()
-        # Nifty = Thursday (3), Sensex = Friday (4)
-        target_day = 4 if self.trading_index == "SENSEX" else 3
+        # Nifty = Tuesday (1) in this env, Sensex = Friday (4)
+        target_day = 4 if self.trading_index == "SENSEX" else 1
         days_ahead = (target_day - today.weekday()) % 7
         
         # If today is expiry day but market is closed, look at next week
@@ -239,8 +239,12 @@ class DataFetcher:
                 f"| FZ-CE-Chg:{oi_pattern['ce_oi_change']} FZ-PE-Chg:{oi_pattern['pe_oi_change']} | IV:{atm_iv:.1f}"
             )
             
-            # --- NEW: Log 7-strike Focus Zone Async ---
+            # --- Log 7-strike Focus Zone Async (per-strike row) ---
             self._log_focus_zone(spot, data)
+            # --- Log macro snapshot async (1 row/min: VIX, PCR, max-pain, ...) ---
+            self._log_macro_snapshot(spot, pcr, focus_pcr, max_pain_strike,
+                                     max_pain_dist, support_strike, resistance_strike,
+                                     change_ce_oi, change_pe_oi, oi_pattern, atm_iv)
             
         except Exception as e:
             logger.error(f"Option chain fetch failed: {e}")
@@ -248,17 +252,31 @@ class DataFetcher:
                 self.cache['last_update'] = 0 # Mark as STALE/INVALID on failure
 
     def _log_focus_zone(self, spot, chain):
-        """Asynchronously save 7-strike focus zone data to CSV."""
+        """Asynchronously save 7-strike focus zone data to CSV.
+        Skips writes outside live market hours (09:15-15:30 IST, weekdays)
+        so the file only contains rows from real trading sessions.
+        Also skips writes if this bot's config has focus_zone_writer=False
+        so we don't get 3x duplicate rows when multiple bots share the file.
+        """
         try:
+            if not self.config.get("focus_zone_writer", True):
+                return
+            now_ist = datetime.now(IST)
+            # Mon=0..Fri=4 are trading days; Sat=5, Sun=6 skipped.
+            if now_ist.weekday() >= 5:
+                return
+            t = now_ist.time()
+            if t < MARKET_OPEN or t >= MARKET_CLOSE:
+                return
+
             strikes = [item["strike_price"] for item in chain]
             if not strikes: return
-            
+
             atm = min(strikes, key=lambda x: abs(x - spot))
             # Store ATM ± 7 (15 strikes total) so we can audit trades on
             # ITM/OTM legs that drift far from the wall during big moves.
             focus_zone = [atm + (i * self.strike_step) for i in range(-7, 8)]
-            
-            now_ist = datetime.now(IST)
+
             today = now_ist.strftime("%Y-%m-%d")
             timestamp = now_ist.strftime("%Y-%m-%d %H:%M:%S")
             index_name = self.trading_index.lower()
@@ -285,12 +303,26 @@ class DataFetcher:
                         "spot": round(spot, 2),
                         "strike": strike,
                         "pos": pos_label,
+                        # CE fields
                         "ce_ltp": ce_m.get("ltp", 0),
                         "ce_oi": ce_m.get("oi", 0),
+                        "ce_prev_oi": ce_m.get("prev_oi", 0),
+                        "ce_volume": ce_m.get("volume", 0),
+                        "ce_iv": ce_g.get("iv", 0),
                         "ce_delta": ce_g.get("delta", 0),
+                        "ce_theta": ce_g.get("theta", 0),
+                        "ce_gamma": ce_g.get("gamma", 0),
+                        "ce_vega": ce_g.get("vega", 0),
+                        # PE fields
                         "pe_ltp": pe_m.get("ltp", 0),
                         "pe_oi": pe_m.get("oi", 0),
-                        "pe_delta": abs(pe_g.get("delta", 0)) # Ensure positive delta notation for comparison
+                        "pe_prev_oi": pe_m.get("prev_oi", 0),
+                        "pe_volume": pe_m.get("volume", 0),
+                        "pe_iv": pe_g.get("iv", 0),
+                        "pe_delta": abs(pe_g.get("delta", 0)),  # positive notation for symmetry
+                        "pe_theta": pe_g.get("theta", 0),
+                        "pe_gamma": pe_g.get("gamma", 0),
+                        "pe_vega": pe_g.get("vega", 0),
                     })
                     
             if not rows: return
@@ -308,9 +340,68 @@ class DataFetcher:
             
             # Fire and forget I/O thread
             threading.Thread(target=write_csv, daemon=True).start()
-            
+
         except Exception as e:
             logger.error(f"Failed to process focus zone logging: {e}")
+
+    def _log_macro_snapshot(self, spot, pcr, focus_pcr, max_pain_strike,
+                            max_pain_dist, support_strike, resistance_strike,
+                            change_ce_oi, change_pe_oi, oi_pattern, atm_iv):
+        """One-row-per-fetch macro snapshot. Cheap time-series for VIX/PCR/
+        max-pain/OI deltas — much smaller than the per-strike focus_zone CSV
+        and easier for analytics that don't need strike-level detail.
+
+        Same gating as focus_zone (market hours + focus_zone_writer flag) so
+        the file only fills during real trading sessions and only one bot per
+        index writes it."""
+        try:
+            if not self.config.get("focus_zone_writer", True):
+                return
+            now_ist = datetime.now(IST)
+            if now_ist.weekday() >= 5:
+                return
+            t = now_ist.time()
+            if t < MARKET_OPEN or t >= MARKET_CLOSE:
+                return
+
+            today = now_ist.strftime("%Y-%m-%d")
+            timestamp = now_ist.strftime("%Y-%m-%d %H:%M:%S")
+            index_name = self.trading_index.lower()
+            csv_path = f"logs/macro_{index_name}_{today}.csv"
+
+            row = {
+                "timestamp": timestamp,
+                "spot": round(spot, 2),
+                "india_vix": self.get_india_vix(),
+                "pcr": pcr,
+                "focus_pcr": focus_pcr,
+                "max_pain_strike": max_pain_strike,
+                "max_pain_dist": max_pain_dist,
+                "support_strike": support_strike,
+                "resistance_strike": resistance_strike,
+                "total_ce_oi_change": change_ce_oi,
+                "total_pe_oi_change": change_pe_oi,
+                "focus_ce_oi_change": oi_pattern.get("ce_oi_change", 0),
+                "focus_pe_oi_change": oi_pattern.get("pe_oi_change", 0),
+                "total_ce_oi": oi_pattern.get("total_ce_oi", 0),
+                "total_pe_oi": oi_pattern.get("total_pe_oi", 0),
+                "atm_iv": atm_iv,
+            }
+
+            def write_csv():
+                try:
+                    file_exists_now = os.path.isfile(csv_path)
+                    with open(csv_path, 'a', newline='') as f:
+                        writer = csv.DictWriter(f, fieldnames=row.keys())
+                        if not file_exists_now:
+                            writer.writeheader()
+                        writer.writerow(row)
+                except Exception as ex:
+                    logger.error(f"Macro snapshot CSV write failed: {ex}")
+
+            threading.Thread(target=write_csv, daemon=True).start()
+        except Exception as e:
+            logger.error(f"Failed to process macro snapshot logging: {e}")
 
     def _calculate_focus_zone_metrics(self, chain, spot):
         """

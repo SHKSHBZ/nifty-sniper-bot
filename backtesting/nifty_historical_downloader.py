@@ -124,7 +124,37 @@ def download_candle(headers: dict, instrument_key: str,
     return df.sort_values("timestamp").reset_index(drop=True)
 
 
+def generate_weekly_expiries(from_d: date, to_d: date) -> list[date]:
+    """Generate all weekly NIFTY Tuesday expiry dates in [from_d, to_d]."""
+    expiries = []
+    # Find the first Tuesday on or after from_d (NIFTY weekly expiry = Tuesday)
+    cur = from_d
+    while cur.weekday() != 1:  # Tuesday = 1
+        cur += timedelta(days=1)
+    while cur <= to_d:
+        expiries.append(cur)
+        cur += timedelta(days=7)
+    return expiries
+
+
 def main():
+    import argparse
+    parser = argparse.ArgumentParser(description="Download 1 year of NIFTY option chain data")
+    parser.add_argument("--from", dest="from_date", default="2025-05-26",
+                        help="Start date for options data coverage (YYYY-MM-DD)")
+    parser.add_argument("--to", dest="to_date", default="2026-05-21",
+                        help="End date for options data coverage (YYYY-MM-DD)")
+    parser.add_argument("--expiries-from", dest="exp_from", default=None,
+                        help="Earliest expiry to fetch (defaults to --from)")
+    parser.add_argument("--expiries-to", dest="exp_to", default=None,
+                        help="Latest expiry to fetch (defaults to --to)")
+    args = parser.parse_args()
+
+    from_dt = datetime.strptime(args.from_date, "%Y-%m-%d").date()
+    to_dt = datetime.strptime(args.to_date, "%Y-%m-%d").date()
+    exp_from = datetime.strptime(args.exp_from, "%Y-%m-%d").date() if args.exp_from else from_dt
+    exp_to = datetime.strptime(args.exp_to, "%Y-%m-%d").date() if args.exp_to else to_dt
+
     auth = UpstoxAuth()
     if not auth.is_session_valid():
         log.error("Upstox session invalid. Authenticate via dashboard first.")
@@ -139,15 +169,17 @@ def main():
         return
     spot_df = pd.read_csv(NIFTY_SPOT_FILE)
 
-    expiries = discover_expiries_from_existing()
-    if not expiries:
-        log.error("No existing NIFTY_*.csv files — set EXPIRIES manually")
-        return
-    log.info(f"Found {len(expiries)} existing expiries to widen")
+    # Generate all weekly expiries, merge with existing
+    existing_expiries = discover_expiries_from_existing()
+    weekly_expiries = generate_weekly_expiries(exp_from, exp_to)
+    all_expiries = sorted(set(existing_expiries + weekly_expiries))
+    log.info(f"Generated {len(weekly_expiries)} weekly expiries "
+             f"({len(existing_expiries)} existing, {len(all_expiries)} total) "
+             f"from {all_expiries[0]} to {all_expiries[-1]}")
 
     DATA_DIR.mkdir(exist_ok=True)
     n_done = n_skip = n_fail = 0
-    for exp in expiries:
+    for exp in all_expiries:
         tok = expiry_token(exp)
         atm = get_atm_for(spot_df, exp)
         if atm is None:
@@ -162,6 +194,7 @@ def main():
         contracts = get_expired_contracts(headers, exp)
         time.sleep(SLEEP_SECONDS)
         if not contracts:
+            log.info(f"{exp} ({tok}): no contracts from API")
             n_fail += 1
             continue
 
@@ -181,7 +214,8 @@ def main():
             if fname.exists():
                 n_skip += 1
                 continue
-            df = download_candle(headers, ikey, exp, exp)
+            # Download full historical range: from our coverage start to expiry
+            df = download_candle(headers, ikey, from_dt, exp)
             time.sleep(SLEEP_SECONDS)
             if df is None or df.empty:
                 continue
@@ -191,6 +225,7 @@ def main():
                 log.info(f"  progress: {n_done} new, {n_skip} cached, {n_fail} failed")
 
     log.info(f"DONE. new={n_done}, cached={n_skip}, failed={n_fail}")
+    log.info("Run 'backtest_regime_phase4.py' to validate.")
 
 
 if __name__ == "__main__":

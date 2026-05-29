@@ -149,7 +149,8 @@ def load_spot_close_at(reference_date: date) -> Optional[float]:
         return None
     sub = df[df["ts"].dt.date <= reference_date]
     if sub.empty:
-        return None
+        # Fallback to the first available spot close if reference_date is before our data starts
+        return float(df.iloc[0]["close"])
     return float(sub.iloc[-1]["close"])
 
 

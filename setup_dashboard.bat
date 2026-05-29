@@ -25,7 +25,7 @@ if errorlevel 1 (
 echo.
 echo [2/3] Installing Python packages (this can take 1-2 minutes)...
 python -m pip install --upgrade pip
-python -m pip install fastapi uvicorn psutil python-dotenv pytz requests pandas numpy upstox-client
+python -m pip install fastapi uvicorn psutil python-dotenv pytz requests pandas numpy upstox-python
 if errorlevel 1 (
   echo.
   echo ERROR: pip install failed. Scroll up to see why.
