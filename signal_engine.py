@@ -228,15 +228,194 @@ def calculate_position_size(capital, entry_premium, sl_premium, lot_size=65, is_
     return qty
 
 
+from vigilance.vic_engine import VICEngine
+from vigilance.zone_memory import ZoneMemoryEngine
+from vigilance.market_structure import MarketStructureEngine
+from vigilance.pattern_engine import PatternEngine
+from vigilance.candle_engine import CandleEngine
+from vigilance.volume_engine import VolumeEngine
+
+class ThreeTimeframeTrendTracker:
+    def __init__(self, ema_window=20):
+        self.ema_window = ema_window
+        self.m15_candles = deque(maxlen=200)
+        self.h1_candles = deque(maxlen=200)
+        self.h4_candles = deque(maxlen=200)
+        
+        self.m15_ema = deque(maxlen=200)
+        self.h1_ema = deque(maxlen=200)
+        self.h4_ema = deque(maxlen=200)
+        
+        self.active_15m = []
+        self.active_1h = []
+        self.active_4h = []
+        self.is_bootstrapped = False
+        
+    def bootstrap(self, fetcher):
+        print("[*] Bootstrapping 3TF Momentum EMAs...")
+        try:
+            access_token = fetcher._load_access_token()
+            if not access_token:
+                raise Exception("Token expired or missing")
+                
+            end_date = datetime.now().strftime("%Y-%m-%d")
+            start_date_15m = (datetime.now() - timedelta(days=15)).strftime("%Y-%m-%d")
+            url_15m = f"{fetcher.base_url}/historical-candle/{fetcher.instrument_key}/15minute/{start_date_15m}/{end_date}"
+            headers = {"Authorization": f"Bearer {access_token}", "Accept": "application/json"}
+            resp_15m = fetcher.session.get(url_15m, headers=headers, timeout=10)
+            
+            if resp_15m.status_code == 200:
+                candles_15m = resp_15m.json().get("data", {}).get("candles", [])
+                candles_15m = sorted(candles_15m, key=lambda x: x[0])
+                for c in candles_15m:
+                    self.m15_candles.append(float(c[4]))
+                print(f"[3TF] Loaded {len(self.m15_candles)} historical 15M candles from Upstox.")
+                
+            start_date_1h = (datetime.now() - timedelta(days=60)).strftime("%Y-%m-%d")
+            url_1h = f"{fetcher.base_url}/historical-candle/{fetcher.instrument_key}/1hour/{start_date_1h}/{end_date}"
+            resp_1h = fetcher.session.get(url_1h, headers=headers, timeout=10)
+            
+            if resp_1h.status_code == 200:
+                candles_1h = resp_1h.json().get("data", {}).get("candles", [])
+                candles_1h = sorted(candles_1h, key=lambda x: x[0])
+                for c in candles_1h:
+                    self.h1_candles.append(float(c[4]))
+                print(f"[3TF] Loaded {len(self.h1_candles)} historical 1H candles from Upstox.")
+                
+                chunk = []
+                for close_p in self.h1_candles:
+                    chunk.append(close_p)
+                    if len(chunk) == 4:
+                        self.h4_candles.append(chunk[-1])
+                        chunk = []
+                print(f"[3TF] Constructed {len(self.h4_candles)} historical 4H candles.")
+                
+            self._recalculate_all_emas()
+            self.is_bootstrapped = True
+            print("[3TF] Bootstrapping completed successfully via Upstox API.")
+            
+        except Exception as e:
+            print(f"[3TF WARNING] Upstox API bootstrap failed: {e}. Attempting local backtesting file...")
+            self._bootstrap_from_local_file()
+            
+    def _bootstrap_from_local_file(self):
+        try:
+            import pandas as pd
+            csv_path = Path("C:/Users/shaik/OneDrive/Desktop/New folder (2)/nifty-sniper-bot/data/NIFTY50_INDEX_1minute.csv")
+            if csv_path.exists():
+                print(f"[3TF] Reading local CSV: {csv_path.name}")
+                df = pd.read_csv(csv_path)
+                df["timestamp"] = pd.to_datetime(df["timestamp"])
+                df = df.set_index("timestamp").sort_index()
+                
+                last_dt = df.index.max()
+                sub = df.loc[last_dt - timedelta(days=60):]
+                
+                df_15m = sub["close"].resample("15min").last().dropna()
+                df_1h = sub["close"].resample("1h").last().dropna()
+                df_4h = sub["close"].resample("4h").last().dropna()
+                
+                for close_p in df_15m.values:
+                    self.m15_candles.append(float(close_p))
+                for close_p in df_1h.values:
+                    self.h1_candles.append(float(close_p))
+                for close_p in df_4h.values:
+                    self.h4_candles.append(float(close_p))
+                    
+                self._recalculate_all_emas()
+                self.is_bootstrapped = True
+                print(f"[3TF] Bootstrapping completed successfully via local CSV. Loaded {len(self.m15_candles)} 15M, {len(self.h1_candles)} 1H, {len(self.h4_candles)} 4H.")
+            else:
+                raise Exception("Local CSV file not found")
+        except Exception as ex:
+            print(f"[3TF WARNING] Local CSV bootstrap failed: {ex}. Falling back to on-the-fly seed.")
+            self.is_bootstrapped = False
+
+    def _recalculate_all_emas(self):
+        self.m15_ema.clear()
+        val = 0.0
+        k = 2 / (self.ema_window + 1)
+        for c in self.m15_candles:
+            val = c if val == 0.0 else c * k + val * (1 - k)
+            self.m15_ema.append(val)
+            
+        self.h1_ema.clear()
+        val = 0.0
+        for c in self.h1_candles:
+            val = c if val == 0.0 else c * k + val * (1 - k)
+            self.h1_ema.append(val)
+            
+        self.h4_ema.clear()
+        val = 0.0
+        for c in self.h4_candles:
+            val = c if val == 0.0 else c * k + val * (1 - k)
+            self.h4_ema.append(val)
+
+    def update(self, ts, spot_price):
+        if not self.is_bootstrapped:
+            self.m15_candles.append(spot_price)
+            self.h1_candles.append(spot_price)
+            self.h4_candles.append(spot_price)
+            self._recalculate_all_emas()
+            self.is_bootstrapped = True
+            print(f"[3TF INFO] On-the-fly bootstrap complete. Seed price: {spot_price}")
+            return
+            
+        self.active_15m.append((ts, spot_price))
+        if ts.minute in [0, 15, 30, 45]:
+            close_p = self.active_15m[-1][1]
+            self.m15_candles.append(close_p)
+            self.active_15m = []
+            k = 2 / (self.ema_window + 1)
+            prev_ema = self.m15_ema[-1] if self.m15_ema else close_p
+            self.m15_ema.append(close_p * k + prev_ema * (1 - k))
+            
+        self.active_1h.append((ts, spot_price))
+        if ts.minute == 0:
+            close_p = self.active_1h[-1][1]
+            self.h1_candles.append(close_p)
+            self.active_1h = []
+            k = 2 / (self.ema_window + 1)
+            prev_ema = self.h1_ema[-1] if self.h1_ema else close_p
+            self.h1_ema.append(close_p * k + prev_ema * (1 - k))
+            
+            self.active_4h.append(close_p)
+            if len(self.active_4h) >= 4:
+                close_4h = self.active_4h[-1]
+                self.h4_candles.append(close_4h)
+                self.active_4h = []
+                prev_ema_4h = self.h4_ema[-1] if self.h4_ema else close_4h
+                self.h4_ema.append(close_4h * k + prev_ema_4h * (1 - k))
+
+    def get_trends(self, current_spot):
+        if not self.is_bootstrapped:
+            return "UP", "UP", "UP"
+        h4 = "UP" if self.h4_ema and current_spot > self.h4_ema[-1] else "DOWN"
+        h1 = "UP" if self.h1_ema and current_spot > self.h1_ema[-1] else "DOWN"
+        m15 = "UP" if self.m15_ema and current_spot > self.m15_ema[-1] else "DOWN"
+        return h4, h1, m15
+
 # ---------------------------------------------------------------------------
-# The Sniper Signal Engine v3.0
+# The Sniper Signal Engine v3.5 (Master Confluence Integrated)
 # ---------------------------------------------------------------------------
 class SignalEngine:
     def __init__(self):
         # Rolling history of (timestamp, focus_pcr, total_ce_oi, total_pe_oi)
-        # used by the slope / OI-delta sub-gates inside Gate 2. Sized for
-        # ~2 hours at 60s polling — plenty for a 30-min lookback.
         self._history = deque(maxlen=180)
+        # Pillar 1 & 2: Institutional Velocity Engine
+        self.vic = VICEngine(lookback_minutes=15)
+        # Pillar 3: History & Role Reversal Engine
+        self.memory = ZoneMemoryEngine()
+        # Topic 2: Market Structure (HH/HL) Engine
+        self.structure = MarketStructureEngine(window=3)
+        # Topic 3: Pattern Engine
+        self.patterns = PatternEngine()
+        # Topic 5: Candlestick Engine
+        self.candles = CandleEngine()
+        # Topic 6: Volume Engine
+        self.volume = VolumeEngine(window=20)
+        # 3TF Trend Tracker
+        self.tracker_3tf = ThreeTimeframeTrendTracker()
 
     @staticmethod
     def _compute_session_vwap(spot_history):
@@ -332,217 +511,275 @@ class SignalEngine:
                                f"({d_pe:+,.0f} > {OI_DELTA_RATIO_MAX}×{d_ce:+,.0f}) — block PE.")
             return True, f"OI delta OK: Δce={d_ce:+,.0f}, Δpe={d_pe:+,.0f}"
 
+    def _classify_fyers_quadrant(self, strike, opt_type, data_fetcher, lookback_minutes=15):
+        """
+        Classify option positioning into one of the 4 Fyers Quadrants.
+        Returns: 'LONG_BUILDUP', 'SHORT_BUILDUP', 'SHORT_COVERING', 'LONG_UNWINDING', or 'WARMUP'
+        """
+        history = data_fetcher.get_option_history(strike, opt_type)
+        if len(history) < 5:
+            return "WARMUP"
+            
+        now_sample = history[-1]
+        
+        # Find sample closest to lookback_minutes ago
+        cutoff = now_sample['time'] - timedelta(minutes=lookback_minutes)
+        ref_sample = None
+        for sample in reversed(history):
+            if sample['time'] <= cutoff:
+                ref_sample = sample
+                break
+        if not ref_sample:
+            ref_sample = history[0]
+            
+        price_diff = now_sample['ltp'] - ref_sample['ltp']
+        oi_diff = now_sample['oi'] - ref_sample['oi']
+        
+        if oi_diff > 0:
+            return "LONG_BUILDUP" if price_diff >= 0 else "SHORT_BUILDUP"
+        else:
+            return "SHORT_COVERING" if price_diff >= 0 else "LONG_UNWINDING"
+
+    def _check_option_volume_momentum(self, strike, opt_type, data_fetcher):
+        """
+        Returns True if option premium expansion is supported by healthy volume growth.
+        """
+        history = data_fetcher.get_option_history(strike, opt_type)
+        if len(history) < 5:
+            return True
+            
+        now_sample = history[-1]
+        prev_sample = history[-2]
+        
+        # If premium is rising, confirm volume is also healthy (greater than the rolling average of past volume)
+        if now_sample['ltp'] > prev_sample['ltp']:
+            past_vols = [s['volume'] for s in list(history)[:-1]]
+            avg_past_vol = sum(past_vols) / len(past_vols) if past_vols else 0
+            if now_sample['volume'] < avg_past_vol * 0.9:
+                return False
+        return True
+
     def evaluate(self, spot_close, support, resistance, focus_pcr, oi_pattern,
                  spot_history, india_vix=15.0, expiry_date=None, current_date=None, scalp_mode=False,
-                 now=None):
+                 now=None, data_fetcher=None):
         """
-        Simplified Two-Gate entry evaluation (refactored 2026-05-26):
-
-        Gate 0: VIX Macro + VWAP — blocks contrarian entries.
-        Gate 1: Proximity + Sustain — Price near S/R wall for 3x 5m candles.
-        Gate 2: Focus PCR — single OI check for directional conviction.
-                CE: PCR in [1.00, 1.30] → bullish
-                PE: PCR in [0.50, 0.95] → bearish
-
-        Old gates 2a (PCR slope), 2b (OI delta ratio), and 3 (OI build-up
-        confirmation) were removed. They added latency without enough
-        marginal signal — by the time all four OI gates passed, the entry
-        premium had already moved against us.
+        Sniper Signal Evaluation v3.5 (Master Confluence Integrated)
+        
+        Hardcoded Pillars & PDF Topics:
+        1. Market Action (VIC Engine): Leading OI conviction signals.
+        2. Trend (Institutional Velocity): Non-lagging directional flow.
+        3. History (Zone Memory): Detection of Role Reversals (Old R -> New S).
+        4. Market Structure (Topic 2): HH/HL and LH/LL Trend Identification.
+        5. Chart Patterns (Topic 3): Reversals (Double Top) and Continuations (Triangle).
+        6. Candlestick Analysis (Topic 5): Hammer/Engulfing Trigger.
+        7. Volume (Topic 6): Institutional Participation Spike.
         """
         direction = None
         reasons = []
 
-        # Snapshot history for slope / OI-delta sub-gates. Use caller-supplied
-        # timestamp when provided (production passes IST; tests/replays pass
-        # historical) so the lookback math stays correct.
         if now is None:
             now = datetime.now()
+
+        # Update 3TF Trend Tracker
+        self.tracker_3tf.update(now, spot_close)
+        h4_trend, h1_trend, m15_trend = self.tracker_3tf.get_trends(spot_close)
+
+        # --- TOPIC 6: Update Volume Engine ---
+        current_volume = 0
+        if spot_history:
+            current_volume = spot_history[-1].get('volume', 0)
+            self.volume.update(current_volume)
+        vol_score = self.volume.get_participation_score(current_volume)
+
+        # --- TOPIC 2: Update Market Structure (HH/HL) ---
+        self.structure.update(now, spot_close)
+        ms = self.structure.get_structure()
+        ms_trend = ms['trend']
+
+        # --- TOPIC 3: Pattern Recognition ---
+        pattern_reversal = self.patterns.detect_reversal(self.structure.swing_highs, self.structure.swing_lows)
+        pattern_cont = self.patterns.detect_continuation(self.structure.swing_highs, self.structure.swing_lows)
+
+        # --- TOPIC 5: Candlestick Trigger ---
+        candle_trigger = None
+        if len(spot_history) >= 2:
+            curr = spot_history[-1]
+            prev = spot_history[-2]
+            candle_trigger = self.candles.get_pattern(
+                open_p=prev['spot'], high_p=max(prev['spot'], curr['spot']),
+                low_p=min(prev['spot'], curr['spot']), close_p=curr['spot'],
+                prev_candle={'open': prev['spot'], 'close': prev['spot'], 'high': prev['spot'], 'low': prev['spot']} # Stub
+            )
+
+        # --- PILLAR 1 & 2: Update Institutional Velocity ---
+        total_ce = oi_pattern.get('total_ce_oi', 0) if isinstance(oi_pattern, dict) else 0
+        total_pe = oi_pattern.get('total_pe_oi', 0) if isinstance(oi_pattern, dict) else 0
+        self.vic.update(now, focus_pcr, total_pe, total_ce)
+        vic_signal = self.vic.get_signal()
+        conviction_score = self.vic.get_conviction_score()
+
         self._push_history(now, focus_pcr, oi_pattern)
-
-        # PR 4: pre-Gate-1 context filters. Run FIRST so we don't waste
-        # cycles evaluating proximity / sustain in obvious no-trade conditions.
-
-        # Range/chop detector — if 60-min spot range is too tight, skip.
-        # OI-AWARE OVERRIDE (added 2026-05-26): When OI conviction is strong
-        # (PE writers >> CE writers = bullish, or inverse), we override the
-        # price-based chop filter. OI positioning is a leading indicator
-        # that can anticipate a breakout before range expansion confirms it.
-        if CHOP_DETECTOR_ENABLED:
-            range_pct = self._compute_range_pct(spot_history, CHOP_RANGE_LOOKBACK_MIN)
-            if range_pct is not None and range_pct < CHOP_RANGE_MAX_PCT:
-                # ── OI conviction override ──────────────────────────────
-                oi_bypass = False
-                oi_bypass_dir = None
-                try:
-                    if isinstance(oi_pattern, dict):
-                        ce_chg = abs(float(oi_pattern.get("ce_oi_change", 0) or 0))
-                        pe_chg = abs(float(oi_pattern.get("pe_oi_change", 0) or 0))
-                        if ce_chg > 0 and pe_chg > 0:
-                            ratio = pe_chg / ce_chg
-                            if ratio >= 1.30:
-                                oi_bypass = True
-                                oi_bypass_dir = "CE (PE writers dominant)"
-                            elif ratio <= 0.70:
-                                oi_bypass = True
-                                oi_bypass_dir = "PE (CE writers dominant)"
-                except Exception:
-                    pass
-
-                if oi_bypass:
-                    reasons.append(
-                        f"⚠️ CHOP FILTER BYPASSED: 60m range {range_pct*100:.2f}% < "
-                        f"{CHOP_RANGE_MAX_PCT*100:.2f}% but OI conviction overrides → {oi_bypass_dir}"
-                    )
-                else:
-                    reasons.append(
-                        f"❌ CHOP FILTER: 60m range {range_pct*100:.2f}% < "
-                        f"{CHOP_RANGE_MAX_PCT*100:.2f}% — no directional edge."
-                    )
-                    return {
-                        "direction": None, "reasons": reasons,
-                        "dte_risk": "MODERATE", "dte_days": 99,
-                        "is_expiry_day": False, "score": 0,
-                    }
-
-        # VWAP filter — block CE below VWAP, PE above VWAP. We compute the
-        # candidate direction from proximity below; for now stash the VWAP
-        # value so the Gate 2 branches can check it.
-        vwap = self._compute_session_vwap(spot_history) if VWAP_FILTER_ENABLED else None
 
         # Calculate distances to walls
         dist_to_sup = abs(spot_close - support) / spot_close if support > 0 else 999
         dist_to_res = abs(resistance - spot_close) / spot_close if resistance > 0 else 999
 
-        # Interpret Focus Zone PCR
-        pcr_bias = interpret_focus_pcr(focus_pcr)
-        
-        # Interpret VIX Trend (>= 18 is fear/downtrend -> Bearish, < 18 is growth -> Bullish)
-        vix_trend = "bearish" if india_vix >= 18.0 else "bullish"
-
-        # ==========================================
-        # Check proximity to Support or Resistance
-        # ==========================================
+        # --- PILLAR 3: Update Zone Memory ---
         near_support = support > 0 and dist_to_sup <= PROXIMITY_PCT
         near_resistance = resistance > 0 and dist_to_res <= PROXIMITY_PCT
 
-        if near_support:
-            # --- GATE 1: Sustain Check at Support ---
+        if near_support: self.memory.record_touch(support, spot_close, now)
+        if near_resistance: self.memory.record_touch(resistance, spot_close, now)
+
+        # Detect Role Reversal (History Repeats)
+        is_reclaim = False
+        if near_resistance:
+            mem_status = self.memory.check_role_reversal(resistance, spot_close, "RESISTANCE")
+            if mem_status == "SUPPORT_RECLAIMED" and conviction_score > 3.0:
+                is_reclaim = True
+                reasons.append(f"🔄 PILLAR 3: Resistance {resistance} RECLAIMED as Support. Switching bias to CE.")
+
+        # ==========================================
+        # SIGNAL LOGIC (MASTER CONFLUENCE)
+        # ==========================================
+        
+        # Priority 1: Support Reclaim (High Gamma Breakout)
+        if is_reclaim:
+            if ms_trend == "DOWNTREND":
+                reasons.append(f"❌ TOPIC 2 FAIL: Role Reversal detected but blocked by Structural DOWNTREND.")
+            else:
+                direction = "CE"
+                reasons.append(f"✅ SIGNAL: Role Reversal detected at {resistance}. Institutional Score: {conviction_score:.1f}")
+        
+        # Priority 2: Standard Support Bounce with Full Confluence
+        elif near_support:
             required_ticks = 1 if scalp_mode else SUSTAIN_TICKS
             sustained = check_sustain(spot_history, support, required_ticks=required_ticks)
             
             if sustained:
-                time_str = "INSTANT TOUCH (Scalp)" if scalp_mode else f"{SUSTAIN_TICKS}x 5m candles"
-                reasons.append(
-                    f"✅ GATE 1 PASS: Price ({spot_close:.0f}) sustained near "
-                    f"Support ({support}) for {time_str}."
-                )
+                # Fyers Option Chain Confluence Gates
+                if data_fetcher is not None:
+                    # 1. S/R Migration Gate
+                    sr_migration = data_fetcher.get_sr_migration()
+                    if sr_migration == "BEARISH_SHIFT":
+                        reasons.append(f"❌ FYERS PILLAR C FAIL: S/R walls are shifting BEARISH ({sr_migration}). Blocking CE entry.")
+                        conviction_score = min(conviction_score, 0.0)
+                    
+                    # 2. Price-OI Quadrant Check on Put Options (Writers defending)
+                    put_quad = self._classify_fyers_quadrant(support, "PE", data_fetcher)
+                    if put_quad == "LONG_BUILDUP":
+                        reasons.append(f"❌ FYERS PILLAR B FAIL: Support {support} is experiencing PUT LONG_BUILDUP (speculative put buying). Blocking CE entry.")
+                        conviction_score = min(conviction_score, 0.0)
+                    elif put_quad == "SHORT_BUILDUP":
+                        reasons.append(f"📊 FYERS PILLAR B PASS: Support {support} confirmed PUT SHORT_BUILDUP (institutional put writing).")
+                        
+                    # 3. Call Option Volume-Premium Momentum Gate
+                    ce_vol_ok = self._check_option_volume_momentum(support, "CE", data_fetcher)
+                    if not ce_vol_ok:
+                        reasons.append(f"❌ FYERS PILLAR A FAIL: CE premium at {support} has low volume participation. Blocking CE entry.")
+                        conviction_score = min(conviction_score, 0.0)
 
-                # --- GATE 0: VIX Macro Trend Check ---
-                if vix_trend == "bearish":
-                    reasons.append(
-                        f"❌ GATE 0 FAIL: India VIX is {india_vix:.2f} (Fear/Downtrend). "
-                        f"Taking CE (Call) entries against the macro trend is blocked."
-                    )
-                # PR 4: VWAP filter — no CE entries below session VWAP.
-                elif vwap is not None and spot_close < vwap:
-                    reasons.append(
-                        f"❌ VWAP FILTER: Spot {spot_close:.0f} below VWAP {vwap:.0f} — "
-                        f"no CE entry against trend."
-                    )
-                else:
-                    reasons.append(f"✅ GATE 0 PASS: VIX={india_vix:.2f} supports CE entries.")
-                    if vwap is not None:
-                        reasons.append(f"✅ VWAP OK: spot {spot_close:.0f} ≥ VWAP {vwap:.0f}")
-
-                    # --- GATE 2: Focus PCR direction check (SIMPLIFIED 2026-05-26) ---
-                    # PCR >= 1.00 → bullish OI conviction. We trust this single
-                    # OI signal rather than layering slope/delta/build-up gates
-                    # that delay entry and inflate premium. The S/R zone framework
-                    # manages the trade once we're in.
-                    if focus_pcr >= FOCUS_PCR_CE_ENTRY_LOW and focus_pcr <= FOCUS_PCR_CE_ENTRY_HIGH:
-                        direction = "CE"
-                        reasons.append(
-                            f"✅ GATE 2 PASS: Focus PCR={focus_pcr:.2f} in CE band "
-                            f"[{FOCUS_PCR_CE_ENTRY_LOW:.2f}-{FOCUS_PCR_CE_ENTRY_HIGH:.2f}] → BULLISH."
-                        )
-                    elif focus_pcr < FOCUS_PCR_CE_ENTRY_LOW:
-                        reasons.append(
-                            f"❌ GATE 2 FAIL: Focus PCR={focus_pcr:.2f} below "
-                            f"{FOCUS_PCR_CE_ENTRY_LOW:.2f}. Bullish flow not yet confirmed."
-                        )
+                # FULL CONFLUENCE: OI + VIC + Pattern + Candle + VOLUME
+                if conviction_score >= 3.0:
+                    if ms_trend == "DOWNTREND":
+                        reasons.append(f"❌ TOPIC 2 FAIL: Conviction high, but Structure is DOWNTREND. Block CE.")
                     else:
-                        reasons.append(
-                            f"❌ GATE 2 FAIL: Focus PCR={focus_pcr:.2f} above "
-                            f"{FOCUS_PCR_CE_ENTRY_HIGH:.2f}. Move over-extended; chasing CE risky."
-                        )
+                        # NEW: Volume & Candle Trigger
+                        if (candle_trigger in ["HAMMER", "BULLISH_ENGULFING"] and vol_score > 1.2) or scalp_mode:
+                            direction = "CE"
+                            conf_msg = f"Bullish Flow ({vic_signal})"
+                            if vol_score > 1.5: conf_msg += f" + 📊 VOL SPIKE ({vol_score:.1f}x)"
+                            if candle_trigger: conf_msg += f" + 🔥 {candle_trigger}"
+                            reasons.append(f"✅ MASTER CONFLUENCE: {conf_msg} at Support {support}. Structure: {ms_trend}.")
+                        else:
+                            reasons.append(f"[WAIT] TOPIC 6: Near Support, but waiting for Volume Participation (Score: {vol_score:.1f}) and Candle Trigger.")
+                else:
+                    reasons.append(f"❌ PILLAR 1 FAIL: Low Institutional Conviction (Score: {conviction_score:.1f}). Block CE.")
             else:
-                time_req = "0m" if scalp_mode else f"{SUSTAIN_TICKS}x 5m candles"
-                reasons.append(
-                    f"[WAIT] GATE 1 PENDING: Price near Support ({support}) but sustain "
-                    f"not confirmed ({time_req} needed)."
-                )
+                reasons.append(f"[WAIT] GATE 1: Price near Support {support} but sustain not confirmed.")
 
+        # Priority 3: Resistance Rejection with Full Confluence
         elif near_resistance:
-            # --- GATE 1: Sustain Check at Resistance ---
             required_ticks = 1 if scalp_mode else SUSTAIN_TICKS
             sustained = check_sustain(spot_history, resistance, required_ticks=required_ticks)
             
             if sustained:
-                time_str = "INSTANT TOUCH (Scalp)" if scalp_mode else f"{SUSTAIN_TICKS}x 5m candles"
-                reasons.append(
-                    f"✅ GATE 1 PASS: Price ({spot_close:.0f}) sustained near "
-                    f"Resistance ({resistance}) for {time_str}."
-                )
+                # Fyers Option Chain Confluence Gates
+                if data_fetcher is not None:
+                    # 1. S/R Migration Gate
+                    sr_migration = data_fetcher.get_sr_migration()
+                    if sr_migration == "BULLISH_SHIFT":
+                        reasons.append(f"❌ FYERS PILLAR C FAIL: S/R walls are shifting BULLISH ({sr_migration}). Blocking PE entry.")
+                        conviction_score = max(conviction_score, 0.0)
+                    
+                    # 2. Price-OI Quadrant Check on Call Options (Writers defending)
+                    call_quad = self._classify_fyers_quadrant(resistance, "CE", data_fetcher)
+                    if call_quad == "LONG_BUILDUP":
+                        reasons.append(f"❌ FYERS PILLAR B FAIL: Resistance {resistance} is experiencing CALL LONG_BUILDUP (speculative call buying). Blocking PE entry.")
+                        conviction_score = max(conviction_score, 0.0)
+                    elif call_quad == "SHORT_BUILDUP":
+                        reasons.append(f"📊 FYERS PILLAR B PASS: Resistance {resistance} confirmed CALL SHORT_BUILDUP (institutional call writing).")
+                        
+                    # 3. Put Option Volume-Premium Momentum Gate
+                    pe_vol_ok = self._check_option_volume_momentum(resistance, "PE", data_fetcher)
+                    if not pe_vol_ok:
+                        reasons.append(f"❌ FYERS PILLAR A FAIL: PE premium at {resistance} has low volume participation. Blocking PE entry.")
+                        conviction_score = max(conviction_score, 0.0)
 
-                # --- GATE 0: VIX Macro Trend Check ---
-                if vix_trend == "bullish":
-                    reasons.append(
-                        f"❌ GATE 0 FAIL: India VIX is {india_vix:.2f} (Growth/Uptrend). "
-                        f"Taking PE (Put) entries against the macro trend is blocked."
-                    )
-                # PR 4: VWAP filter — no PE entries above session VWAP.
-                elif vwap is not None and spot_close > vwap:
-                    reasons.append(
-                        f"❌ VWAP FILTER: Spot {spot_close:.0f} above VWAP {vwap:.0f} — "
-                        f"no PE entry against trend."
-                    )
-                else:
-                    reasons.append(f"✅ GATE 0 PASS: VIX={india_vix:.2f} supports PE entries.")
-                    if vwap is not None:
-                        reasons.append(f"✅ VWAP OK: spot {spot_close:.0f} ≤ VWAP {vwap:.0f}")
-
-                    # --- GATE 2: Focus PCR direction check (SIMPLIFIED 2026-05-26) ---
-                    # PCR <= 0.95 → bearish OI conviction. Single OI signal
-                    # replaces the old layered slope/delta/build-up gates.
-                    if FOCUS_PCR_PE_ENTRY_LOW <= focus_pcr <= FOCUS_PCR_PE_ENTRY_HIGH:
-                        direction = "PE"
-                        reasons.append(
-                            f"✅ GATE 2 PASS: Focus PCR={focus_pcr:.2f} in PE band "
-                            f"[{FOCUS_PCR_PE_ENTRY_LOW:.2f}-{FOCUS_PCR_PE_ENTRY_HIGH:.2f}] → BEARISH."
-                        )
-                    elif focus_pcr > FOCUS_PCR_PE_ENTRY_HIGH:
-                        reasons.append(
-                            f"❌ GATE 2 FAIL: Focus PCR={focus_pcr:.2f} above "
-                            f"{FOCUS_PCR_PE_ENTRY_HIGH:.2f}. Bearish flow not yet confirmed."
-                        )
+                if conviction_score <= -3.0:
+                    if ms_trend == "UPTREND":
+                        reasons.append(f"❌ TOPIC 2 FAIL: Bearish conviction, but Structure is UPTREND. Block PE.")
                     else:
-                        reasons.append(
-                            f"❌ GATE 2 FAIL: Focus PCR={focus_pcr:.2f} below "
-                            f"{FOCUS_PCR_PE_ENTRY_LOW:.2f}. Move over-extended; chasing PE risky."
-                        )
+                        if (candle_trigger in ["SHOOTING_STAR", "BEARISH_ENGULFING"] and vol_score > 1.2) or scalp_mode:
+                            direction = "PE"
+                            conf_msg = f"Bearish Flow ({vic_signal})"
+                            if vol_score > 1.5: conf_msg += f" + 📊 VOL SPIKE ({vol_score:.1f}x)"
+                            if candle_trigger: conf_msg += f" + ❄️ {candle_trigger}"
+                            reasons.append(f"✅ MASTER CONFLUENCE: {conf_msg} at Resistance {resistance}. Structure: {ms_trend}.")
+                        else:
+                            reasons.append(f"[WAIT] TOPIC 6: Near Resistance, but waiting for Volume Participation (Score: {vol_score:.1f}) and Candle Trigger.")
+                else:
+                    reasons.append(f"❌ PILLAR 1 FAIL: Low Institutional Conviction (Score: {conviction_score:.1f}). Block PE.")
             else:
-                time_req = "0m" if scalp_mode else f"{SUSTAIN_TICKS}x 5m candles"
-                reasons.append(
-                    f"[WAIT] GATE 1 PENDING: Price near Resistance ({resistance}) but "
-                    f"sustain not confirmed ({time_req} needed)."
-                )
+                reasons.append(f"[WAIT] GATE 1: Price near Resistance {resistance} but sustain not confirmed.")
 
         else:
-            reasons.append(
-                f"No proximity: Spot={spot_close:.0f} | "
-                f"S={support} (dist={dist_to_sup:.4f}) | "
-                f"R={resistance} (dist={dist_to_res:.4f})"
-            )
+            reasons.append(f"No proximity: Spot={spot_close:.0f} | S={support} | R={resistance} | Structure={ms_trend} | Vol={vol_score:.1f}x")
+
+        # Final Pattern-Only Signals (Breakouts)
+        if direction is None and pattern_cont in ["ASCENDING_TRIANGLE", "DESCENDING_TRIANGLE"] and abs(conviction_score) >= 7.0 and vol_score > 1.5:
+             if pattern_cont == "ASCENDING_TRIANGLE" and conviction_score >= 7.0:
+                 direction = "CE"
+                 reasons.append(f"✅ SIGNAL: High-Conviction TRIANGLE Breakout + VOLUME SPIKE (Score: {conviction_score:.1f}, Vol: {vol_score:.1f}x).")
+             elif pattern_cont == "DESCENDING_TRIANGLE" and conviction_score <= -7.0:
+                 direction = "PE"
+                 reasons.append(f"✅ SIGNAL: High-Conviction TRIANGLE Breakout + VOLUME SPIKE (Score: {conviction_score:.1f}, Vol: {vol_score:.1f}x).")
+
+        # --- 3TF CONFLUENCE CHECK & CRB BYPASS ---
+        enable_3tf = OPTIONS_CONFIG.get("configurableParameters", {}).get("enable_3tf_filters", False)
+        if enable_3tf and direction:
+            is_bullish = (h4_trend == "UP" and h1_trend == "UP" and m15_trend == "UP")
+            is_bearish = (h4_trend == "DOWN" and h1_trend == "DOWN" and m15_trend == "DOWN")
+            
+            # Reversal confirmations at S/R walls can bypass 3TF filters (retaining mean-reversion edge)
+            has_candle_confirm = candle_trigger in ["HAMMER", "BULLISH_ENGULFING", "SHOOTING_STAR", "BEARISH_ENGULFING", "BULLISH_MARUBOZU", "BEARISH_MARUBOZU"]
+            has_volume_spike = vol_score >= 1.30 or conviction_score >= 5.0
+            is_high_conviction_reversal = (near_support or near_resistance) and (has_candle_confirm or has_volume_spike)
+            
+            if direction == "CE" and not is_bullish:
+                if is_high_conviction_reversal:
+                    reasons.append(f"⚡ 3TF BYPASS ACTIVE: CE generated with non-aligned trends (4H={h4_trend}, 1H={h1_trend}, 15M={m15_trend}), but bypassed due to High-Conviction Reversal at Support (Candle={candle_trigger}, Vol={vol_score:.1f}x).")
+                else:
+                    reasons.append(f"❌ 3TF FILTER FAIL: CE signal generated but 3TF not aligned (4H={h4_trend}, 1H={h1_trend}, 15M={m15_trend}). Sitting on hands.")
+                    direction = None
+            elif direction == "PE" and not is_bearish:
+                if is_high_conviction_reversal:
+                    reasons.append(f"⚡ 3TF BYPASS ACTIVE: PE generated with non-aligned trends (4H={h4_trend}, 1H={h1_trend}, 15M={m15_trend}), but bypassed due to High-Conviction Reversal at Resistance (Candle={candle_trigger}, Vol={vol_score:.1f}x).")
+                else:
+                    reasons.append(f"❌ 3TF FILTER FAIL: PE signal generated but 3TF not aligned (4H={h4_trend}, 1H={h1_trend}, 15M={m15_trend}). Sitting on hands.")
+                    direction = None
+            else:
+                reasons.append(f"✅ 3TF CONFLUENCE PASS: 4H={h4_trend}, 1H={h1_trend}, 15M={m15_trend} aligned.")
 
         # DTE Risk Classification
         dte_risk = "MODERATE"

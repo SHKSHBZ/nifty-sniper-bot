@@ -144,9 +144,9 @@ both_could = sum(1 for r in rows if abs(r['spot_move']) < 200 and abs(r['spot_mo
 buyer_only = sum(1 for r in rows if abs(r['spot_move']) >= 200)
 seller_only = sum(1 for r in rows if abs(r['spot_move']) < 60)
 print(f"\nDay classification (213 days):")
-print(f"  Pure range (|move|<60):   {seller_only:>3} days  → seller wins, buyer skips")
-print(f"  Mixed (60≤|move|<200):    {both_could:>3} days  → both fire (overlap zone)")
-print(f"  Trend (|move|≥200):       {buyer_only:>3} days  → buyer wins big, seller breaches")
+print(f"  Pure range (|move|<60):   {seller_only:>3} days  -> seller wins, buyer skips")
+print(f"  Mixed (60<=|move|<200):    {both_could:>3} days  -> both fire (overlap zone)")
+print(f"  Trend (|move|>=200):       {buyer_only:>3} days  -> buyer wins big, seller breaches")
 
 # Sample worst buyer days
 print(f"\n10 worst buyer days:")

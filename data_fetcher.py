@@ -45,6 +45,9 @@ class DataFetcher:
         }
         self.vix_history = deque(maxlen=20)
         self.spot_history = deque(maxlen=60)  # 60 readings = ~60 minutes of 1-min spot prices
+        self.support_history = deque(maxlen=30)  # Tracks last 30 fetches ~ 30 minutes of Support strikes
+        self.resistance_history = deque(maxlen=30)  # Tracks last 30 fetches ~ 30 minutes of Resistance strikes
+        self.option_history = {}  # strike_optType -> deque of {'time': datetime, 'ltp': float, 'oi': int, 'volume': int}
         self.lock = threading.Lock()
         self.session = requests.Session()
 
@@ -233,6 +236,35 @@ class DataFetcher:
                     'token_map': token_map,
                     'last_update': time.time()
                 })
+                # Append to S/R histories
+                self.support_history.append(support_strike)
+                self.resistance_history.append(resistance_strike)
+                
+                # Update in-memory option strike histories
+                now_time = datetime.now()
+                for item in data:
+                    s = item["strike_price"]
+                    ce_m = item.get("call_options", {}).get("market_data", {})
+                    pe_m = item.get("put_options", {}).get("market_data", {})
+                    
+                    ce_ltp = ce_m.get("ltp", 0)
+                    ce_oi = ce_m.get("oi", 0)
+                    ce_vol = ce_m.get("volume", 0)
+                    
+                    pe_ltp = pe_m.get("ltp", 0)
+                    pe_oi = pe_m.get("oi", 0)
+                    pe_vol = pe_m.get("volume", 0)
+                    
+                    for suffix, ltp, oi, vol in [("CE", ce_ltp, ce_oi, ce_vol), ("PE", pe_ltp, pe_oi, pe_vol)]:
+                        key = f"{s}_{suffix}"
+                        if key not in self.option_history:
+                            self.option_history[key] = deque(maxlen=60)
+                        self.option_history[key].append({
+                            'time': now_time,
+                            'ltp': ltp,
+                            'oi': oi,
+                            'volume': vol
+                        })
             logger.info(
                 f"[OK] MACRO | PCR:{pcr:.2f} FocusPCR:{focus_pcr:.2f} | S:{support_strike} R:{resistance_strike} "
                 f"| MaxPain:{max_pain_strike} | CE-OI-Chg:{change_ce_oi} PE-OI-Chg:{change_pe_oi} "
@@ -566,6 +598,41 @@ class DataFetcher:
     def get_focus_pcr(self): return self.cache.get('focus_pcr', 1.0)
     def get_oi_pattern(self): return self.cache.get('oi_pattern', {'ce_oi_change': 0, 'pe_oi_change': 0, 'total_ce_oi': 0, 'total_pe_oi': 0})
     def get_spot_history(self): return list(self.spot_history)
+
+    def get_sr_migration(self):
+        """
+        Calculates the shift of support/resistance over the lookback window.
+        Returns:
+            'BULLISH_SHIFT': both support and resistance have migrated higher.
+            'BEARISH_SHIFT': both support and resistance have migrated lower.
+            'NEUTRAL': no coherent shift.
+        """
+        with self.lock:
+            if len(self.support_history) < 10:
+                return "NEUTRAL"
+            start_sup = self.support_history[0]
+            end_sup = self.support_history[-1]
+            start_res = self.resistance_history[0]
+            end_res = self.resistance_history[-1]
+            
+            if end_sup > start_sup and end_res > start_res:
+                return "BULLISH_SHIFT"
+            elif end_sup < start_sup and end_res < start_res:
+                return "BEARISH_SHIFT"
+            return "NEUTRAL"
+
+    def get_option_history(self, strike, opt_type):
+        """
+        Returns list of {'time': datetime, 'ltp': float, 'oi': int, 'volume': int} for target strike.
+        """
+        with self.lock:
+            key_f = f"{float(strike)}_{opt_type}"
+            key_i = f"{int(strike)}_{opt_type}"
+            if key_f in self.option_history:
+                return list(self.option_history[key_f])
+            if key_i in self.option_history:
+                return list(self.option_history[key_i])
+            return []
 
     def get_live_quote(self, instrument_key):
         """Turbo Query: 1 Call per 3 seconds is well within the 10/sec API limit."""

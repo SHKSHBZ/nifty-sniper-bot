@@ -142,9 +142,17 @@ class LiveOrchestrator:
         # Daily entry cap — block new entries after N completed trades today.
         with open(self.config.get("options_spec_path", "Options.json")) as fh:
             opts = json.load(fh).get("configurableParameters", {})
+        self.opts = opts
         self.max_positions_per_day = int(opts.get("maxPositionsPerDay", 6))
         self._positions_today_date = None  # date string the counter belongs to
         self._positions_today_count = 0
+        
+        # Bootstrap 3TF trend EMAs on startup if enabled
+        if self.config.get("enable_3tf_filters", False) or opts.get("enable_3tf_filters", False):
+            try:
+                self.engine.tracker_3tf.bootstrap(self.fetcher)
+            except Exception as e:
+                logger.error(f"Failed to bootstrap 3TF tracker: {e}")
         # PR 2: drawdown breaker + consecutive-loss regime self-diagnostic.
         # daily_drawdown_pct = -1.5% of session-start cap halts entries for the day.
         self.daily_drawdown_pct = float(opts.get("dailyDrawdownPct", 1.5)) / 100.0
@@ -340,45 +348,80 @@ class LiveOrchestrator:
         lots_sold = pos.get('lots_sold', 0)
 
         # ── Tiered Profit Booking (2026-05-26) ─────────────────────────
-        pts_from_entry = live_premium - entry_price
-        TIER1_PTS = 20
-        TIER2_PTS = 35
-        TIER1_LOTS = 3
-        TIER2_LOTS = 1
-        TRAIL_LOTS = 1
+        use_pct_scale = self.config.get("enable_3tf_filters", False) or self.opts.get("enable_3tf_filters", False)
+        
+        if use_pct_scale:
+            # ── 5-Lot Partial Exit (Scale-Out) Strategy ──────────────────
+            gain_pct = (live_premium - entry_price) / entry_price
+            SCALE_TP_PCT = float(self.opts.get("scale_out_tp_percent", 15)) / 100.0
+            RUNNER_TP_PCT = float(self.opts.get("scale_out_runner_percent", 30)) / 100.0
+            
+            # Tier 1: +15% → sell 3 lots, move SL to breakeven
+            if not pos.get('tier1_done') and gain_pct >= SCALE_TP_PCT:
+                lots_to_sell = min(3, remaining)
+                if lots_to_sell > 0:
+                    self._partial_close(pos, live_premium, lots_to_sell,
+                                        f"SCALE_TP (+{int(SCALE_TP_PCT*100)}%, {lots_to_sell} lots)")
+                    pos['tier1_done'] = True
+                    pos['remaining_lots'] = pos.get('remaining_lots', total_lots) - lots_to_sell
+                    pos['lots_sold'] = pos.get('lots_sold', 0) + lots_to_sell
+                    pos['sl_price'] = entry_price  # Move SL to Breakeven
+                    pos['tsl_active'] = True
+                    logger.info(f"🟢 SCALE-OUT TARGET 1 HIT! 3 lots sold. SL moved to Breakeven: Rs.{entry_price:.2f}")
+                    self.save_portfolio()
+                    remaining = pos['remaining_lots']
+            
+            # Tier 2: +30% → sell remaining 2 lots
+            if pos.get('tier1_done') and not pos.get('tier2_done') and gain_pct >= RUNNER_TP_PCT:
+                lots_to_sell = remaining
+                if lots_to_sell > 0:
+                    self._partial_close(pos, live_premium, lots_to_sell,
+                                        f"RUNNER_TP (+{int(RUNNER_TP_PCT*100)}%, {lots_to_sell} lots)")
+                    pos['tier2_done'] = True
+                    pos['remaining_lots'] = 0
+                    pos['lots_sold'] = pos.get('lots_sold', 0) + lots_to_sell
+                    self.save_portfolio()
+                    remaining = pos['remaining_lots']
+        else:
+            pts_from_entry = live_premium - entry_price
+            TIER1_PTS = 20
+            TIER2_PTS = 35
+            TIER1_LOTS = 3
+            TIER2_LOTS = 1
+            TRAIL_LOTS = 1
 
-        # Tier 1: +20 pts → sell 3 lots
-        if not pos.get('tier1_done') and pts_from_entry >= TIER1_PTS:
-            lots_to_sell = min(TIER1_LOTS, remaining)
-            if lots_to_sell > 0:
-                pnl_tier1 = pts_from_entry * lots_to_sell * self.lot_size
-                self._partial_close(pos, live_premium, lots_to_sell,
-                                    f"TIER1 (+{TIER1_PTS}pts, {lots_to_sell} lots)")
-                pos['tier1_done'] = True
-                pos['remaining_lots'] = pos.get('remaining_lots', total_lots) - lots_to_sell
-                pos['lots_sold'] = pos.get('lots_sold', 0) + lots_to_sell
+            # Tier 1: +20 pts → sell 3 lots
+            if not pos.get('tier1_done') and pts_from_entry >= TIER1_PTS:
+                lots_to_sell = min(TIER1_LOTS, remaining)
+                if lots_to_sell > 0:
+                    pnl_tier1 = pts_from_entry * lots_to_sell * self.lot_size
+                    self._partial_close(pos, live_premium, lots_to_sell,
+                                        f"TIER1 (+{TIER1_PTS}pts, {lots_to_sell} lots)")
+                    pos['tier1_done'] = True
+                    pos['remaining_lots'] = pos.get('remaining_lots', total_lots) - lots_to_sell
+                    pos['lots_sold'] = pos.get('lots_sold', 0) + lots_to_sell
+                    self.save_portfolio()
+                    remaining = pos['remaining_lots']
+
+            # Tier 2: +35 pts → sell 1 lot
+            if pos.get('tier1_done') and not pos.get('tier2_done') and pts_from_entry >= TIER2_PTS:
+                lots_to_sell = min(TIER2_LOTS, remaining)
+                if lots_to_sell > 0:
+                    self._partial_close(pos, live_premium, lots_to_sell,
+                                        f"TIER2 (+{TIER2_PTS}pts, {lots_to_sell} lot)")
+                    pos['tier2_done'] = True
+                    pos['remaining_lots'] = pos.get('remaining_lots', 1) - lots_to_sell
+                    pos['lots_sold'] = pos.get('lots_sold', 0) + lots_to_sell
+                    self.save_portfolio()
+                    remaining = pos['remaining_lots']
+
+            # Trail lot: activate breakeven SL once Tier 2 is done
+            if pos.get('tier2_done') and not pos.get('trail_active'):
+                pos['trail_active'] = True
+                pos['trail_cost'] = entry_price  # breakeven
+                pos['sl_price'] = entry_price    # trail stop at cost
+                logger.info(f"🟢 TRAIL ACTIVE: last {TRAIL_LOTS} lot at breakeven (Rs.{entry_price:.2f})")
                 self.save_portfolio()
-                remaining = pos['remaining_lots']
-
-        # Tier 2: +35 pts → sell 1 lot
-        if pos.get('tier1_done') and not pos.get('tier2_done') and pts_from_entry >= TIER2_PTS:
-            lots_to_sell = min(TIER2_LOTS, remaining)
-            if lots_to_sell > 0:
-                self._partial_close(pos, live_premium, lots_to_sell,
-                                    f"TIER2 (+{TIER2_PTS}pts, {lots_to_sell} lot)")
-                pos['tier2_done'] = True
-                pos['remaining_lots'] = pos.get('remaining_lots', 1) - lots_to_sell
-                pos['lots_sold'] = pos.get('lots_sold', 0) + lots_to_sell
-                self.save_portfolio()
-                remaining = pos['remaining_lots']
-
-        # Trail lot: activate breakeven SL once Tier 2 is done
-        if pos.get('tier2_done') and not pos.get('trail_active'):
-            pos['trail_active'] = True
-            pos['trail_cost'] = entry_price  # breakeven
-            pos['sl_price'] = entry_price    # trail stop at cost
-            logger.info(f"🟢 TRAIL ACTIVE: last {TRAIL_LOTS} lot at breakeven (Rs.{entry_price:.2f})")
-            self.save_portfolio()
 
         # If no remaining lots, close position
         if pos.get('remaining_lots', 0) <= 0:
@@ -675,24 +718,24 @@ class LiveOrchestrator:
                 return
 
             # ── Fixed 5-lot position with tiered profit booking (2026-05-26) ──
-            # Always enter with 5 lots. Exit in tiers:
-            #   Tier 1: +20 pts → sell 3 lots (book quick profit)
-            #   Tier 2: +35 pts → sell 1 lot  (ride further)
-            #   Tier 3: trail 1 lot at cost (let it run, breakeven SL)
-            # Legacy SL/TP/theta exits apply to REMAINING lots only.
-            TOTAL_LOTS = 5
-            TIER1_PTS = 20   # sell 3 lots at +20 points from entry
-            TIER2_PTS = 35   # sell 1 lot at +35 points from entry
+            use_pct_scale = self.config.get("enable_3tf_filters", False) or self.opts.get("enable_3tf_filters", False)
+            TOTAL_LOTS = int(self.opts.get("fixed_lots_to_trade", 5)) if use_pct_scale else 5
+            
+            TIER1_PTS = 20
+            TIER2_PTS = 35
             TIER1_LOTS = 3
             TIER2_LOTS = 1
-            TRAIL_LOTS = 1   # 1 lot trailed at cost
+            TRAIL_LOTS = 1
 
             qty = self.lot_size * TOTAL_LOTS
             is_expiry = signal['is_expiry_day']
-            sl_pct = signal.get('tactic_sl_pct') or (0.15 if is_expiry else 0.15)  # tightened to 15%
-            time_stop_min = signal.get('tactic_time_stop_min',
-                                        45 if is_expiry else 120)
-
+            
+            if use_pct_scale:
+                sl_pct = float(self.opts.get("scale_out_hard_sl_percent", 20)) / 100.0
+            else:
+                sl_pct = signal.get('tactic_sl_pct') or (0.15 if is_expiry else 0.15)
+                
+            time_stop_min = signal.get('tactic_time_stop_min', 45 if is_expiry else 120)
             sl_prem = live_premium * (1 - sl_pct)
             tactic_name = signal.get('tactic_name', 'oi_wall_mean_reversion')
 
@@ -760,15 +803,31 @@ class LiveOrchestrator:
             itm_tag = f"ITM ({abs(atm_strike - best_strike) // self.strike_step} strike{'s' if abs(atm_strike - best_strike) // self.strike_step > 1 else ''} in)" if best_strike != atm_strike else "ATM"
             sup = self.fetcher.get_support()
             res = self.fetcher.get_resistance()
-            msg = (f"🚀 PAPER TRADE ENTERED\n"
-                   f"Type: BUY {best_strike} {direction} [{itm_tag}]\n"
-                   f"Entry: Rs. {live_premium:.2f} x {TOTAL_LOTS} lots\n"
-                   f"Zone: S={sup} → R={res}\n"
-                   f"Tier1: +{TIER1_PTS}pts → sell {TIER1_LOTS} lots | "
-                   f"Tier2: +{TIER2_PTS}pts → sell {TIER2_LOTS} lot | "
-                   f"Trail: {TRAIL_LOTS} lot at cost\n"
-                   f"SL: Rs. {sl_prem:.2f} | Delta: {delta:.2f}\n"
-                   f"Reason: {signal['reasons'][0]}")
+            
+            if use_pct_scale:
+                SCALE_TP_PCT = float(self.opts.get("scale_out_tp_percent", 15))
+                RUNNER_TP_PCT = float(self.opts.get("scale_out_runner_percent", 30))
+                HARD_SL_PCT = float(self.opts.get("scale_out_hard_sl_percent", 20))
+                
+                msg = (f"🚀 PAPER TRADE ENTERED (3TF Momentum)\n"
+                       f"Type: BUY {best_strike} {direction} [{itm_tag}]\n"
+                       f"Entry: Rs. {live_premium:.2f} x {TOTAL_LOTS} lots\n"
+                       f"Zone: S={sup} → R={res}\n"
+                       f"Scale-out: +{SCALE_TP_PCT:.0f}% (Sell 3 lots) → SL to BE\n"
+                       f"Runner: +{RUNNER_TP_PCT:.0f}% (Sell 2 lots)\n"
+                       f"Stop Loss: -{HARD_SL_PCT:.0f}% (Rs. {sl_prem:.2f})\n"
+                       f"Reason: {signal['reasons'][0]}")
+            else:
+                msg = (f"🚀 PAPER TRADE ENTERED\n"
+                       f"Type: BUY {best_strike} {direction} [{itm_tag}]\n"
+                       f"Entry: Rs. {live_premium:.2f} x {TOTAL_LOTS} lots\n"
+                       f"Zone: S={sup} → R={res}\n"
+                       f"Tier1: +{TIER1_PTS}pts → sell {TIER1_LOTS} lots | "
+                       f"Tier2: +{TIER2_PTS}pts → sell {TIER2_LOTS} lot | "
+                       f"Trail: {TRAIL_LOTS} lot at cost\n"
+                       f"SL: Rs. {sl_prem:.2f} | Delta: {delta:.2f}\n"
+                       f"Reason: {signal['reasons'][0]}")
+            
             logger.info(msg)
             self.telegram.send_message(msg)
         else:
@@ -1046,71 +1105,102 @@ class LiveOrchestrator:
         }
         self.portfolio["trade_history"].append(record)
 
-        # Journal: record exit before clearing open_position
-        if self.journal is not None and self._journal_day_started:
-            try:
-                tactic_name = pos.get('tactic_name', 'oi_wall_mean_reversion')
-                self.journal.on_exit(
-                    tactic=tactic_name,
-                    exit_ts=exit_time,
-                    exit_premium=exit_price,
-                    exit_reason=reason,
-                    net_pnl=pnl,
-                )
-            except Exception as e:
-                logger.warning(f"Journal on_exit failed: {e}")
+        # Telegram notification
+        msg = (f"🏁 PAPER TRADE CLOSED\n"
+               f"Type: Final Close for {pos['strike']} {pos['opt_type']}\n"
+               f"Exit Reason: {reason}\n"
+               f"Exit Price: Rs. {exit_price:.2f} (Entry: Rs. {pos['entry_price']:.2f})\n"
+               f"Lots Closed: {remaining}/{pos.get('total_lots', 5)}\n"
+               f"P&L (Remaining): Rs. {pnl:+,.2f}\n"
+               f"New Capital: Rs. {self.portfolio['capital']:.2f}")
+        logger.info(msg)
+        self.telegram.send_message(msg)
+
+        # PR 2: consecutive-loss tracking + regime self-diagnostic.
+        if pnl < 0:
+            self._consecutive_losses += 1
+            if (self._consecutive_losses >= self.consecutive_loss_threshold
+                    and self._regime_lock is None):
+                try:
+                    spot_hist = self.fetcher.get_spot_history()
+                    pcr_oi_hist = self.engine._history
+                    reading = classify_regime(spot_hist, pcr_oi_hist)
+                    self._regime_lock_reasons = list(reading.reasons)
+                    if reading.is_chop:
+                        self._regime_lock = "STOPPED"
+                    elif reading.is_trending and reading.direction == "CE":
+                        self._regime_lock = "CE_ONLY"
+                    elif reading.is_trending and reading.direction == "PE":
+                        self._regime_lock = "PE_ONLY"
+                    diag = (f"[REGIME DIAGNOSTIC] After {self.consecutive_loss_threshold} "
+                            f"losses: verdict={reading.verdict}, lock={self._regime_lock}\n"
+                            + "\n".join(f"  - {r}" for r in reading.reasons))
+                    logger.warning(diag)
+                    self.telegram.send_message(diag)
+                except Exception as e:
+                    logger.warning(f"Regime classifier failed: {e}")
+        else:
+            self._consecutive_losses = 0
 
         self.portfolio["open_position"] = None
         self.save_portfolio()
         return  # avoid falling into the next method
 
     # ===================================================================
-    # T2 Straddle: parallel entry / monitor / close path.
+    # T2 Straddle/Strangle: parallel entry / monitor / close path.
     # Lives in self.portfolio["open_straddle"] (separate slot from
     # open_position so single-leg logic stays untouched).
     # ===================================================================
 
     def _open_straddle_position(self, signal: dict, now, spot: float) -> None:
-        """Place both legs of a straddle simultaneously (paper-mode only).
-        Reads ATM premiums fresh from the fetcher so the price reflects
+        """Place both legs of a straddle or strangle simultaneously (paper-mode only).
+        Reads premiums fresh from the fetcher so the price reflects
         the actual entry tick, not the dispatcher snapshot.
         """
         atm_strike = int(round(spot / self.strike_step) * self.strike_step)
+        
+        strike_offset = int(signal.get('strike_offset', 0))
+        second_strike_offset = int(signal.get('second_strike_offset', 0))
+        
+        leg1_strike = atm_strike + (strike_offset * self.strike_step)
+        leg2_strike = atm_strike + (second_strike_offset * self.strike_step)
+        
         leg1_dir = signal.get('direction', 'CE')
         leg2_dir = signal.get('second_direction', 'PE')
 
-        leg1_premium = self.fetcher.get_option_ltp(atm_strike, leg1_dir)
-        leg2_premium = self.fetcher.get_option_ltp(atm_strike, leg2_dir)
+        leg1_premium = self.fetcher.get_option_ltp(leg1_strike, leg1_dir)
+        leg2_premium = self.fetcher.get_option_ltp(leg2_strike, leg2_dir)
 
         if leg1_premium <= 0 or leg2_premium <= 0:
             logger.info(
-                f"T2 signal received but premiums unavailable "
+                f"Double-legged signal received but premiums unavailable "
                 f"({leg1_dir}={leg1_premium}, {leg2_dir}={leg2_premium}). "
                 f"Skipping."
             )
             return
 
-        # Defensive re-check: market may have moved between gate-pass (in
-        # the dispatcher) and now. Re-validate the per-leg premium band so
-        # a 1-2 tick drift doesn't push us into a trade we'd no longer take.
-        # Bounds match T2Config (5.0 / 20.0) — kept here as constants so
-        # this method is self-contained.
+        # Defensive premium bands (T2 backtest limits). We bypass or extend these limits for custom tactics.
+        tactic_name = signal.get('tactic_name', 't2_expiry_straddle')
+        is_t2 = ("t2" in tactic_name.lower())
+        
         T2_MIN_PREM_PER_LEG = 5.0
         T2_MAX_PREM_PER_LEG = 20.0
-        if not (T2_MIN_PREM_PER_LEG <= leg1_premium <= T2_MAX_PREM_PER_LEG):
-            logger.info(
-                f"T2 entry blocked: {leg1_dir} premium {leg1_premium:.2f} "
-                f"drifted out of band [{T2_MIN_PREM_PER_LEG}, {T2_MAX_PREM_PER_LEG}] "
-                f"between gate and entry."
-            )
-            return
-        if not (T2_MIN_PREM_PER_LEG <= leg2_premium <= T2_MAX_PREM_PER_LEG):
-            logger.info(
-                f"T2 entry blocked: {leg2_dir} premium {leg2_premium:.2f} "
-                f"drifted out of band [{T2_MIN_PREM_PER_LEG}, {T2_MAX_PREM_PER_LEG}] "
-                f"between gate and entry."
-            )
-            return
+        
+        if is_t2:
+            if not (T2_MIN_PREM_PER_LEG <= leg1_premium <= T2_MAX_PREM_PER_LEG):
+                logger.info(
+                    f"T2 entry blocked: {leg1_dir} premium {leg1_premium:.2f} "
+                    f"drifted out of band [{T2_MIN_PREM_PER_LEG}, {T2_MAX_PREM_PER_LEG}] "
+                    f"between gate and entry."
+                )
+                return
+            if not (T2_MIN_PREM_PER_LEG <= leg2_premium <= T2_MAX_PREM_PER_LEG):
+                logger.info(
+                    f"T2 entry blocked: {leg2_dir} premium {leg2_premium:.2f} "
+                    f"drifted out of band [{T2_MIN_PREM_PER_LEG}, {T2_MAX_PREM_PER_LEG}] "
+                    f"between gate and entry."
+                )
+                return
 
         combined_entry = leg1_premium + leg2_premium
         combined_sl_pct = float(signal.get('combined_sl_pct') or 0.50)
@@ -1118,16 +1208,14 @@ class LiveOrchestrator:
         time_stop_min = int(signal.get('tactic_time_stop_min', 35))
 
         # Sizing: same Rs.20k/trade rule used by single-leg.
-        # Cost per "unit" = combined_premium x lot_size (1 lot CE + 1 lot PE).
         cost_per_unit = combined_entry * self.lot_size
         if cost_per_unit <= 0:
-            logger.warning("T2: cost_per_unit is zero, cannot size.")
+            logger.warning("Double-legged: cost_per_unit is zero, cannot size.")
             return
-        capital_per_trade = 20_000.0   # matches T2 backtest sizing
+        capital_per_trade = 20_000.0
         lots = max(1, int(capital_per_trade // cost_per_unit))
         qty_per_leg = lots * self.lot_size
 
-        # Daily entry counter shared with single-leg path
         self._positions_today_count += 1
 
         sl_combined_price = combined_entry * (1 - combined_sl_pct)
@@ -1136,11 +1224,13 @@ class LiveOrchestrator:
 
         self.portfolio["open_straddle"] = {
             "entry_time": now.isoformat(),
-            "tactic_name": signal.get('tactic_name', 't2_expiry_straddle'),
+            "tactic_name": tactic_name,
             "atm_strike": atm_strike,
             "leg1_dir": leg1_dir,
+            "leg1_strike": leg1_strike,
             "leg1_entry_price": leg1_premium,
             "leg2_dir": leg2_dir,
+            "leg2_strike": leg2_strike,
             "leg2_entry_price": leg2_premium,
             "combined_entry": combined_entry,
             "combined_sl_price": sl_combined_price,
@@ -1154,19 +1244,21 @@ class LiveOrchestrator:
         self.save_portfolio()
 
         logger.info(
-            f"[T2 STRADDLE OPENED] strike={atm_strike} "
-            f"{leg1_dir}={leg1_premium:.2f} {leg2_dir}={leg2_premium:.2f} "
+            f"[DOUBLE-LEGGED OPENED] {tactic_name} L1={leg1_strike}({leg1_dir})@{leg1_premium:.2f} "
+            f"L2={leg2_strike}({leg2_dir})@{leg2_premium:.2f} "
             f"combined={combined_entry:.2f} lots={lots} (qty/leg={qty_per_leg}) "
             f"SL={sl_combined_price:.2f} TP={tp_combined_price}"
         )
         if self.telegram is not None:
             try:
                 self.telegram.send_message(
-                    f"[T2 STRADDLE OPENED]\n"
-                    f"Strike: {atm_strike}\n"
-                    f"CE+PE entry: Rs.{combined_entry:.2f}\n"
-                    f"Lots: {lots}, qty/leg: {qty_per_leg}\n"
-                    f"SL (combined): Rs.{sl_combined_price:.2f}"
+                    f"[{tactic_name.upper()} OPENED]\n"
+                    f"Leg 1: {leg1_strike} {leg1_dir} @ {leg1_premium:.2f}\n"
+                    f"Leg 2: {leg2_strike} {leg2_dir} @ {leg2_premium:.2f}\n"
+                    f"Combined Entry: {combined_entry:.2f}\n"
+                    f"Lots: {lots} (Qty/Leg: {qty_per_leg})\n"
+                    f"Combined SL: {sl_combined_price:.2f}\n"
+                    f"Combined TP: {tp_combined_price}"
                 )
             except Exception:
                 pass
@@ -1188,10 +1280,11 @@ class LiveOrchestrator:
             return
 
         # Fetch live premiums for both legs
-        ce_dir = sd["leg1_dir"]; ce_strike = sd["atm_strike"]
-        pe_dir = sd["leg2_dir"]
-        leg1_now = self.fetcher.get_option_ltp(ce_strike, ce_dir)
-        leg2_now = self.fetcher.get_option_ltp(ce_strike, pe_dir)
+        ce_dir = sd["leg1_dir"]; pe_dir = sd["leg2_dir"]
+        leg1_strike = sd.get("leg1_strike", sd["atm_strike"])
+        leg2_strike = sd.get("leg2_strike", sd["atm_strike"])
+        leg1_now = self.fetcher.get_option_ltp(leg1_strike, ce_dir)
+        leg2_now = self.fetcher.get_option_ltp(leg2_strike, pe_dir)
         if leg1_now <= 0 or leg2_now <= 0:
             return  # stale tick, skip — but DON'T overwrite last_good cache
 
@@ -1230,10 +1323,12 @@ class LiveOrchestrator:
             return
 
         ce_dir = sd["leg1_dir"]; pe_dir = sd["leg2_dir"]
-        strike = sd["atm_strike"]; qty = sd["qty_per_leg"]
+        leg1_strike = sd.get("leg1_strike", sd["atm_strike"])
+        leg2_strike = sd.get("leg2_strike", sd["atm_strike"])
+        qty = sd["qty_per_leg"]
 
-        leg1_exit = self.fetcher.get_option_ltp(strike, ce_dir)
-        leg2_exit = self.fetcher.get_option_ltp(strike, pe_dir)
+        leg1_exit = self.fetcher.get_option_ltp(leg1_strike, ce_dir)
+        leg2_exit = self.fetcher.get_option_ltp(leg2_strike, pe_dir)
 
         # Fallback chain when fresh fetch returns 0/missing:
         #   1. Use last-good LTP cached during _monitor_straddle ticks
@@ -1772,6 +1867,18 @@ class LiveOrchestrator:
                 except Exception:
                     pass
 
+            # Get 3TF Trends
+            h4_trend, h1_trend, m15_trend = "DOWN", "DOWN", "DOWN"
+            h4_ema, h1_ema, m15_ema = 0.0, 0.0, 0.0
+            if hasattr(self.engine, "tracker_3tf"):
+                try:
+                    h4_trend, h1_trend, m15_trend = self.engine.tracker_3tf.get_trends(spot)
+                    h4_ema = float(self.engine.tracker_3tf.h4_ema[-1]) if self.engine.tracker_3tf.h4_ema else 0.0
+                    h1_ema = float(self.engine.tracker_3tf.h1_ema[-1]) if self.engine.tracker_3tf.h1_ema else 0.0
+                    m15_ema = float(self.engine.tracker_3tf.m15_ema[-1]) if self.engine.tracker_3tf.m15_ema else 0.0
+                except Exception:
+                    pass
+
             pos = self.portfolio.get("open_position")
             in_position = pos is not None
 
@@ -1816,6 +1923,14 @@ class LiveOrchestrator:
                 "trend_direction": snap.get("trend_direction", "FLAT"),
                 "rejection_at_high": int(snap.get("rejection_at_high", 0) or 0),
                 "rejection_at_low": int(snap.get("rejection_at_low", 0) or 0),
+                # 3TF Metrics
+                "h4_trend": h4_trend,
+                "h1_trend": h1_trend,
+                "m15_trend": m15_trend,
+                "h4_ema": h4_ema,
+                "h1_ema": h1_ema,
+                "m15_ema": m15_ema,
+                "enable_3tf_filters": self.config.get("enable_3tf_filters", False) or self.opts.get("enable_3tf_filters", False),
             }
             self.state_publisher.write_engine_state(engine_state)
 

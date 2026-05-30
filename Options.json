@@ -121,6 +121,12 @@
     "t2MinPremiumPerLeg": 5.0,
     "t2MaxPremiumPerLeg": 20.0,
     "t2CombinedSlPct": 0.50,
-    "t2TimeStopMin": 35
+    "t2TimeStopMin": 35,
+    "enable_3tf_filters": true,
+    "scale_out_tp_percent": 15,
+    "scale_out_runner_percent": 30,
+    "scale_out_hard_sl_percent": 20,
+    "fixed_lots_to_trade": 5,
+    "cooldown_minutes": 60
   }
 }

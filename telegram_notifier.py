@@ -53,7 +53,7 @@ class TelegramNotifier:
                                f"Open Positions: {open_pos}\n"
                                f"PnL Today: ₹{pnl:,.0f}\n"
                                f"Status: `RUNNING`")
-                        self.send(msg)
+                        self.send_message(msg)
                 except Exception as e:
                     logger.error(f"Heartbeat error: {e}")
                 time.sleep(60)

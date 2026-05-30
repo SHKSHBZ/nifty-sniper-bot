@@ -141,15 +141,24 @@ class TacticDispatcher:
         self.t2_tactic = T2ExpiryStraddleTactic(T2Config())
         self._t2_fired_date = None       # date of last T2 firing (one per day)
 
+        # T3 Expiry Strangle (Fyers Strangle Strategy optimization)
+        # Fires only on expiry days in [14:50, 15:00] window.
+        # Two-leg OTM strangle (Call strike +1 offset, Put strike -1 offset)
+        from tactics.t3_expiry_strangle import T3ExpiryStrangleTactic, T3Config
+        self.t3_enabled = bool(opts.get("t3Enabled", True))
+        self.t3_tactic = T3ExpiryStrangleTactic(T3Config())
+        self._t3_fired_date = None       # date of last T3 firing (one per day)
+
     # ----- lifecycle ----------------------------------------------------
 
     def reset_for_new_day(self, day, prev_day_close: float) -> None:
         self.indicators.start_day(day, prev_day_close)
         self.classifier._current = None     # type: ignore[attr-defined]
         self.classifier._candidate = None   # type: ignore[attr-defined]
-        # T1 + T2: re-arm for the new session, forget yesterday's anchors.
+        # T1 + T2 + T3: re-arm for the new session, forget yesterday's anchors.
         self._t1_fired_date = None
         self._t2_fired_date = None
+        self._t3_fired_date = None
         self._vix_open_today = None
         self._vix_open_date = None
         log.info("dispatcher: reset for %s (prev_close=%.1f)", day, prev_day_close)
@@ -306,6 +315,52 @@ class TacticDispatcher:
                 legacy["tactic_name"] = "t2_expiry_straddle"
                 legacy["near_misses"] = []
                 log.info("T2 fired: %s", t2_sig.reason)
+                return legacy
+
+        # ---- T3 Expiry Strangle (high-priority, expiry days only) ----
+        # Fires AT MOST once per day in the [14:50, 15:00] window on
+        # expiry day (DTE==0) when both OTM legs are in the [2, 12]
+        # premium band. Two-leg strangle — caller must place both legs.
+        if (self.t3_enabled
+                and not in_position
+                and dte == 0
+                and self._t3_fired_date != ts.date()
+                and self.t3_tactic.config.decision_time_start <= ts.time()
+                                                              <= self.t3_tactic.config.decision_time_end):
+            atm_strike = int(round(spot / self.strike_step) * self.strike_step)
+            offset_steps = self.t3_tactic.config.strike_offset_steps
+            otm_ce_strike = atm_strike + (offset_steps * self.strike_step)
+            otm_pe_strike = atm_strike - (offset_steps * self.strike_step)
+            try:
+                otm_ce_premium = float(fetcher.get_option_ltp(otm_ce_strike, "CE") or 0.0)
+                otm_pe_premium = float(fetcher.get_option_ltp(otm_pe_strike, "PE") or 0.0)
+            except Exception as e:
+                log.warning("T3: OTM premium lookup failed: %s", e)
+                otm_ce_premium = otm_pe_premium = 0.0
+
+            t3_state = self._build_tactic_state(
+                ts=ts, snap=snap, spot=spot, vix=vix, focus_pcr=focus_pcr,
+                oi_pattern=oi_pattern, support=support, resistance=resistance,
+                dte=dte, expiry_str=expiry_str,
+                regime=Regime.RANGE,    # placeholder
+                in_position=in_position,
+                position_direction=position_direction,
+                position_entry_premium=position_entry_premium,
+                position_lots_added=position_lots_added,
+            )
+            # Inject OTM premiums fetched above
+            t3_state.otm_ce_premium = otm_ce_premium
+            t3_state.otm_pe_premium = otm_pe_premium
+
+            t3_sig = self.t3_tactic.evaluate(t3_state)
+            if t3_sig is not None:
+                self._t3_fired_date = ts.date()
+                legacy = _legacy_signal_from_tactic(
+                    t3_sig, Regime.RANGE, dte, is_expiry,
+                )
+                legacy["tactic_name"] = "t3_expiry_strangle"
+                legacy["near_misses"] = []
+                log.info("T3 fired: %s", t3_sig.reason)
                 return legacy
 
         # Build classifier features (with what we have — some fields stubbed)
@@ -562,6 +617,7 @@ class TacticDispatcher:
             expiry_date=fetcher.get_expiry_date(),
             current_date=ts.strftime("%Y-%m-%d"),
             now=ts,
+            data_fetcher=fetcher,
         )
         if regime is not None and sig.get("direction"):
             sig["reasons"].insert(0, f"[{regime.value}] OI-Wall MR fired")
