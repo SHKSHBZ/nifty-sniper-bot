@@ -631,7 +631,7 @@ class LiveOrchestrator:
             ts=now,
             fetcher=self.fetcher,
             engine=self.engine,
-            in_position=False,
+            in_position=bool(self.portfolio["open_position"]),
         )
 
         # Register any near-misses surfaced by the dispatcher with the
@@ -736,6 +736,7 @@ class LiveOrchestrator:
                 sl_pct = signal.get('tactic_sl_pct') or (0.15 if is_expiry else 0.15)
                 
             time_stop_min = signal.get('tactic_time_stop_min', 45 if is_expiry else 120)
+            tgt_pct = signal.get('tactic_tp_pct') or (0.35 if is_expiry else 0.50)
             sl_prem = live_premium * (1 - sl_pct)
             tactic_name = signal.get('tactic_name', 'oi_wall_mean_reversion')
 
@@ -1104,6 +1105,19 @@ class LiveOrchestrator:
             "reason": reason
         }
         self.portfolio["trade_history"].append(record)
+
+        # Journal: record exit
+        if self.journal is not None and self._journal_day_started:
+            try:
+                self.journal.on_exit(
+                    tactic=pos.get('tactic_name', ''),
+                    exit_ts=exit_time,
+                    exit_premium=exit_price,
+                    exit_reason=reason,
+                    net_pnl=pnl,
+                )
+            except Exception as e:
+                logger.warning(f"Journal on_exit failed: {e}")
 
         # Telegram notification
         msg = (f"🏁 PAPER TRADE CLOSED\n"

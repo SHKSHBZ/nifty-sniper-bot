@@ -92,6 +92,15 @@ class TacticState:
     # Regime classifier output (string form of Regime enum)
     regime: str = "RANGE"
 
+    # 3TF (4H / 1H / 15M) trend alignment — supplied by dispatcher when
+    # enable_3tf_filters is active. Values: "UP", "DOWN", or "NEUTRAL".
+    h4_trend: str = "NEUTRAL"
+    h1_trend: str = "NEUTRAL"
+    m15_trend: str = "NEUTRAL"
+    h4_ema: float = 0.0
+    h1_ema: float = 0.0
+    m15_ema: float = 0.0
+
     # Pyramiding context — managed by caller, supplied here read-only
     is_in_position: bool = False
     open_position_direction: Optional[str] = None  # "CE" | "PE" | None

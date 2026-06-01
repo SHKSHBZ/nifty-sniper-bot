@@ -259,6 +259,7 @@ class TacticDispatcher:
                 position_direction=position_direction,
                 position_entry_premium=position_entry_premium,
                 position_lots_added=position_lots_added,
+                engine=engine,
             )
             t1_sig = self.t1_tactic.evaluate(t1_state)
             if t1_sig is not None:
@@ -301,6 +302,7 @@ class TacticDispatcher:
                 position_direction=position_direction,
                 position_entry_premium=position_entry_premium,
                 position_lots_added=position_lots_added,
+                engine=engine,
             )
             # Inject ATM premiums fetched above
             t2_state.atm_ce_premium = ce_premium
@@ -347,6 +349,7 @@ class TacticDispatcher:
                 position_direction=position_direction,
                 position_entry_premium=position_entry_premium,
                 position_lots_added=position_lots_added,
+                engine=engine,
             )
             # Inject OTM premiums fetched above
             t3_state.otm_ce_premium = otm_ce_premium
@@ -450,15 +453,24 @@ class TacticDispatcher:
             position_direction=position_direction,
             position_entry_premium=position_entry_premium,
             position_lots_added=position_lots_added,
+            engine=engine,
         )
 
         sig = tactic.evaluate(state)
 
         # On TREND regimes, also give IEF a chance (it has a stricter setup
         # so will only fire on real SMC patterns; rare but high-quality).
-        if (self.ief_enabled and sig is None
-                and regime in (Regime.TREND_UP, Regime.TREND_DOWN,
-                               Regime.TREND_UP_GAP, Regime.TREND_DOWN_GAP)):
+        # Also allow IEF in RANGE regime when 3TF shows strong alignment
+        # (2+ timeframes agree on direction) — catches directional moves
+        # the classifier hasn't yet upgraded to TREND.
+        ief_eligible = regime in (Regime.TREND_UP, Regime.TREND_DOWN,
+                                   Regime.TREND_UP_GAP, Regime.TREND_DOWN_GAP)
+        if not ief_eligible and regime == Regime.RANGE:
+            tf_votes_up = sum(1 for t in (state.h4_trend, state.h1_trend, state.m15_trend) if t == "UP")
+            tf_votes_down = sum(1 for t in (state.h4_trend, state.h1_trend, state.m15_trend) if t == "DOWN")
+            if tf_votes_up >= 2 or tf_votes_down >= 2:
+                ief_eligible = True
+        if self.ief_enabled and sig is None and ief_eligible:
             ief_sig = self.ief_tactic.evaluate(state)
             if ief_sig is not None:
                 legacy = _legacy_signal_from_tactic(ief_sig, regime, dte, is_expiry)
@@ -631,8 +643,21 @@ class TacticDispatcher:
         self, *, ts, snap, spot, vix, focus_pcr, oi_pattern,
         support, resistance, dte, expiry_str, regime,
         in_position, position_direction, position_entry_premium,
-        position_lots_added,
+        position_lots_added, engine=None,
     ) -> TacticState:
+        # ── 3TF trends (if engine has tracker_3tf) ──
+        h4_trend = h1_trend = m15_trend = "NEUTRAL"
+        h4_ema = h1_ema = m15_ema = 0.0
+        if engine is not None and hasattr(engine, "tracker_3tf"):
+            try:
+                t3 = engine.tracker_3tf
+                if t3.is_bootstrapped:
+                    h4_trend, h1_trend, m15_trend = t3.get_trends(spot)
+                    h4_ema = float(t3.h4_ema[-1]) if t3.h4_ema else 0.0
+                    h1_ema = float(t3.h1_ema[-1]) if t3.h1_ema else 0.0
+                    m15_ema = float(t3.m15_ema[-1]) if t3.m15_ema else 0.0
+            except Exception:
+                pass
         return TacticState(
             ts=ts,
             spot=spot,
@@ -674,6 +699,12 @@ class TacticDispatcher:
             vix_chg_today_pct=self._compute_vix_chg_today_pct(vix, ts),
             vix_open_today=self._vix_open_today or 0.0,
             regime=regime.value,
+            h4_trend=h4_trend,
+            h1_trend=h1_trend,
+            m15_trend=m15_trend,
+            h4_ema=h4_ema,
+            h1_ema=h1_ema,
+            m15_ema=m15_ema,
             is_in_position=in_position,
             open_position_direction=position_direction,
             open_position_entry_premium=position_entry_premium,

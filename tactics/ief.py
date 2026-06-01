@@ -292,7 +292,7 @@ class IEFAnalyzer:
 @dataclass
 class IEFConfig(TacticConfig):
     name: str = "ief"
-    min_history_bars: int = 25         # need enough bars for swings + CHoCH
+    min_history_bars: int = 15         # reduced from 25; 15 bars = 75 min, enough for swings+CHoCH
     choch_lookback_bars: int = 20      # CHoCH must be within this many bars
     require_ob_or_fvg_confluence: bool = True
     # Golden Zone bounds (Phase 11 evidence: stricter 0.618-0.786 was over-
@@ -328,6 +328,18 @@ class IEFTactic(Tactic):
         if len(state.recent_5m_bars) < cfg.min_history_bars:
             return None
 
+        # ── 3TF directional filter ──
+        # When 2+ timeframes agree on direction, only allow trades in
+        # that direction. This prevents counter-trend CHoCH traps.
+        tf_votes_up = sum(1 for t in (state.h4_trend, state.h1_trend, state.m15_trend) if t == "UP")
+        tf_votes_down = sum(1 for t in (state.h4_trend, state.h1_trend, state.m15_trend) if t == "DOWN")
+        if tf_votes_up >= 2:
+            self._allowed_direction = "CE"
+        elif tf_votes_down >= 2:
+            self._allowed_direction = "PE"
+        else:
+            self._allowed_direction = None  # neutral — allow both
+
         bars = [Bar.from_tuple(t) for t in state.recent_5m_bars]
         analysis = self.analyzer.analyze(bars, state.atr_5m)
 
@@ -344,6 +356,9 @@ class IEFTactic(Tactic):
 
         # Determine impulse leg endpoints to compute golden zone
         if choch.side == "up":
+            # 3TF gate: if 3TF is bearish, block CE entries
+            if self._allowed_direction == "PE":
+                return None
             # Impulse leg: from swing-low BEFORE the broken-pivot up to the
             # broken-pivot (the swing high that was taken out)
             impulse_start = analysis.swings[0].price if analysis.swings else bars[0].low
@@ -356,6 +371,9 @@ class IEFTactic(Tactic):
             )
             return self._evaluate_long(state, bars, analysis, choch, zone)
         else:  # down
+            # 3TF gate: if 3TF is bullish, block PE entries
+            if self._allowed_direction == "CE":
+                return None
             impulse_start = analysis.swings[0].price if analysis.swings else bars[0].high
             for s in analysis.swings:
                 if s.side == "high" and s.idx <= choch.idx:
@@ -480,6 +498,22 @@ class IEFTactic(Tactic):
             len(state.recent_5m_bars) >= cfg.min_history_bars,
             len(state.recent_5m_bars), cfg.min_history_bars,
             f"history bars {len(state.recent_5m_bars)} >= {cfg.min_history_bars}",
+        )
+
+        # 3TF directional alignment gate
+        tf_votes_up = sum(1 for t in (state.h4_trend, state.h1_trend, state.m15_trend) if t == "UP")
+        tf_votes_down = sum(1 for t in (state.h4_trend, state.h1_trend, state.m15_trend) if t == "DOWN")
+        tf_aligned_with_direction = (
+            (direction == "CE" and tf_votes_down < 2) or
+            (direction == "PE" and tf_votes_up < 2) or
+            (tf_votes_up < 2 and tf_votes_down < 2)  # neutral — allow both
+        )
+        tf_summary = f"4H={state.h4_trend} 1H={state.h1_trend} 15M={state.m15_trend}"
+        gates["3tf_aligned"] = GateResult(
+            tf_aligned_with_direction,
+            tf_summary,
+            f"no 2+ TF opposing {direction}",
+            f"3TF {tf_summary} {'supports' if tf_aligned_with_direction else 'opposes'} {direction}",
         )
 
         if len(state.recent_5m_bars) < cfg.min_history_bars or state.atr_5m <= 0:
