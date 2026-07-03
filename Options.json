@@ -127,6 +127,21 @@
     "scale_out_runner_percent": 30,
     "scale_out_hard_sl_percent": 20,
     "fixed_lots_to_trade": 5,
-    "cooldown_minutes": 60
+    "cooldown_minutes": 60,
+    "oi_flow_ema_fast": 9,
+    "oi_flow_ema_slow": 21,
+    "oi_flow_candle_minutes": 3,
+    "oi_flow_oi_lookback_minutes": 5,
+    "oi_flow_max_trades_per_day": 2,
+    "oi_flow_max_daily_loss": 15000,
+    "oi_flow_max_hold_minutes": 30,
+    "oi_flow_emergency_sl_pct": 25,
+    "trailing_sl_pct": 0.25,
+    "oi_flow_signal_threshold": 500000,
+    "oi_flow_min_range": 80,
+    "oi_flow_entry_start": "09:30",
+    "oi_flow_entry_end": "14:30",
+    "oi_flow_capital_per_trade": 75000,
+    "oi_flow_consecutive_loss_breaker": 3
   }
 }

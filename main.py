@@ -8,6 +8,7 @@ from pathlib import Path
 from upstox_auth import UpstoxAuth
 from data_fetcher import DataFetcher
 from signal_engine import SignalEngine
+from oi_flow_engine import OIFlowEngine
 from telegram_notifier import TelegramNotifier
 from regime import TacticDispatcher
 from regime.market_hours import (
@@ -76,13 +77,21 @@ class LiveOrchestrator:
         self.lot_size = strat.get("sensex_lot_size", 20) if self.trading_index == "SENSEX" else strat.get("nifty_lot_size", 65)
 
         self.fetcher = DataFetcher(self.config)
-        self.engine = SignalEngine()
+        self.engine_mode = self.config.get("engine_mode", "legacy")
+        
+        # ── Engine selection ──
+        if self.engine_mode == "oi_flow":
+            self.engine = OIFlowEngine(self.config)
+            logger.info("[OK] Engine: OI-Flow v1.1")
+        else:
+            self.engine = SignalEngine()
+            logger.info(f"[OK] Engine mode: {self.engine_mode}")
+        
         self.telegram = TelegramNotifier()
 
         # --- Portfolio path: legacy keeps old name, variants get a suffix ---
         # so multiple engines can run side-by-side on the same index without
         # overwriting each other's portfolios.
-        self.engine_mode = self.config.get("engine_mode", "legacy")
         # Seller mode = run iron-condor entry/monitor/close path instead of
         # the buyer scan. Mutually exclusive with single-leg / straddle paths.
         self.seller_mode = bool(self.config.get("seller_mode", False))
@@ -147,12 +156,12 @@ class LiveOrchestrator:
         self._positions_today_date = None  # date string the counter belongs to
         self._positions_today_count = 0
         
-        # Bootstrap 3TF trend EMAs on startup if enabled
-        if self.config.get("enable_3tf_filters", False) or opts.get("enable_3tf_filters", False):
-            try:
-                self.engine.tracker_3tf.bootstrap(self.fetcher)
-            except Exception as e:
-                logger.error(f"Failed to bootstrap 3TF tracker: {e}")
+        # Bootstrap 3TF trend EMAs on startup if enabled.
+        # Deferred to run() so the API token and market data are live
+        # (bootstrapping pre-market often fails with stale tokens).
+        self._3tf_needs_bootstrap = self.config.get(
+            "enable_3tf_filters", opts.get("enable_3tf_filters", False)
+        )
         # PR 2: drawdown breaker + consecutive-loss regime self-diagnostic.
         # daily_drawdown_pct = -1.5% of session-start cap halts entries for the day.
         self.daily_drawdown_pct = float(opts.get("dailyDrawdownPct", 1.5)) / 100.0
@@ -193,7 +202,12 @@ class LiveOrchestrator:
             with open(self.portfolio_file, "r") as f:
                 self.portfolio = json.load(f)
         else:
-            self.portfolio = {"capital": 100000.0, "open_position": None, "trade_history": []}
+            self.portfolio = {"capital": 600000.0, "open_positions": [], "trade_history": []}
+        # Migrate legacy single open_position to list
+        if "open_position" in self.portfolio and self.portfolio["open_position"]:
+            self.portfolio.setdefault("open_positions", [])
+            self.portfolio["open_positions"].append(self.portfolio.pop("open_position"))
+        self.portfolio.setdefault("open_positions", [])
         # T2: ensure the straddle slot exists (None if not currently active)
         self.portfolio.setdefault("open_straddle", None)
         # Seller bot: ensure the iron-condor slot exists
@@ -209,6 +223,20 @@ class LiveOrchestrator:
         # Wait until the market is open (handles pre-market / post-market /
         # weekend startups gracefully).
         self._wait_until_market_open()
+
+        # Bootstrap 3TF trend EMAs now that market is open and API is live
+        if getattr(self, '_3tf_needs_bootstrap', False):
+            try:
+                self.engine.tracker_3tf.bootstrap(self.fetcher)
+                logger.info("3TF bootstrap completed after market open.")
+            except Exception as e:
+                logger.error(f"3TF bootstrap failed (will seed on-the-fly): {e}")
+
+        # Bootstrap Gann Square of 9 levels for today
+        if self.engine_mode == "oi_flow":
+            self._bootstrap_gann_levels()
+            self._recover_engine_state_if_needed()
+
         try:
             while True:
                 now = datetime.now(IST)
@@ -232,17 +260,27 @@ class LiveOrchestrator:
                 # Publish current state for the dashboard backend.
                 self._publish_state(now)
 
-                # At market close (15:30 IST): flatten any open position(s)
-                # and shut down. New entries are allowed all the way up to
-                # the close — no earlier cutoff.
+                # At market close (15:30 IST): flatten all open positions
+                # and shut down.
                 if t >= MARKET_CLOSE:
-                    if self.portfolio["open_position"]:
-                        self._close_position("Market Close (15:30 IST)")
+                    for pos in list(self.portfolio.get("open_positions", [])):
+                        self._close_position("Market Close (15:30 IST)", pos=pos)
                     if self.portfolio.get("open_straddle"):
                         self._close_straddle("Market Close (15:30 IST)")
                     logger.info("Market Closed (15:30 IST). Shutting down.")
                     self._finalize_journal_day()
                     break
+
+                # ── OI-Flow mode (v1.1) ───────────────────────────
+                # Minimal engine: spot trend + OI velocity only.
+                if self.engine_mode == "oi_flow":
+                    self._run_oi_flow_tick(now)
+                    if self.engine.position is not None:
+                        time.sleep(3)
+                    else:
+                        sleep_secs = 60 - datetime.now(IST).second
+                        time.sleep(max(1, sleep_secs))
+                    continue
 
                 # ── Seller mode (iron condor only) ────────────────────
                 # Runs a completely separate flow from the buyer paths.
@@ -257,18 +295,22 @@ class LiveOrchestrator:
                         time.sleep(max(1, sleep_secs))
                     continue
 
-                # ── Buyer mode (legacy + regime + T1 + T2) ────────────
-                # Priority order: straddle (T2) > single-leg (T1, regime) > scan.
-                # Both can never coexist (straddle blocks single-leg entry and
-                # vice versa via _scan_for_entries gating).
+                # ── Buyer mode: always monitor open positions, scan for new entries ──
+                open_positions = self.portfolio.get("open_positions", [])
                 if self.portfolio.get("open_straddle"):
                     self._monitor_straddle(now)
-                    time.sleep(3)
-                elif self.portfolio["open_position"]:
-                    self._monitor_position(now)
-                    time.sleep(3) # Turbo query loop: 1 hit per 3s = 0.33/sec (Safe via API)
-                else:
+                elif open_positions:
+                    self._monitor_all_positions(now)
+                
+                # Scan for new entries (only if we have room)
+                max_concurrent = int(self.opts.get("maxConcurrentPositions", 5))
+                if len(open_positions) < max_concurrent:
                     self._scan_for_entries(now)
+                
+                # Sleep: 3s if holding positions, 60s if idle
+                if open_positions or self.portfolio.get("open_straddle"):
+                    time.sleep(3)
+                else:
                     sleep_secs = 60 - datetime.now(IST).second
                     time.sleep(max(1, sleep_secs))
 
@@ -324,8 +366,91 @@ class LiveOrchestrator:
 
     # _next_market_open lives in regime/market_hours.py for testability.
 
-    def _monitor_position(self, now):
-        pos = self.portfolio["open_position"]
+    def _bootstrap_gann_levels(self):
+        """
+        Loads yesterday's close price from cache (syncing with API first)
+        and initializes the Gann Square of 9 engine.
+        """
+        try:
+            import historical_levels
+            from gann_engine import GannSquareOf9
+            
+            idx = self.trading_index
+            logger.info(f"[GANN] Syncing daily cache to get yesterday's close for {idx}...")
+            
+            # Update cache to make sure we have yesterday's candle
+            cached = historical_levels.load_cache(idx)
+            from_date, to_date = historical_levels.get_missing_dates(cached, lookback_days=60)
+            if from_date and to_date:
+                new_rows = self.fetcher.get_historical_daily_ohlc(from_date, to_date)
+                if new_rows:
+                    cached = historical_levels.merge_and_trim(cached, new_rows, lookback_days=60)
+                    historical_levels.save_cache(idx, cached)
+                    logger.info(f"[GANN] Daily cache updated with {len(new_rows)} new rows.")
+            
+            yesterday_close = cached[-1]["close"] if cached else None
+            if not yesterday_close or yesterday_close <= 0:
+                # Fallback to current spot if cache is empty
+                yesterday_close = self.fetcher.get_spot()
+                
+            if yesterday_close > 0:
+                gann = GannSquareOf9(yesterday_close)
+                self.engine.gann = gann
+                logger.info(f"[GANN] ✅ Gann Square of 9 initialized with Base={yesterday_close:.2f}")
+                logger.info(f"[GANN] Buy +45: {gann.levels['buy'][45]:.2f} | Buy +90: {gann.levels['buy'][90]:.2f}")
+                logger.info(f"[GANN] Sell -45: {gann.levels['sell'][45]:.2f} | Sell -90: {gann.levels['sell'][90]:.2f}")
+            else:
+                logger.error("[GANN] Could not retrieve base price for Gann levels")
+                self.engine.gann = None
+        except Exception as e:
+            logger.error(f"[GANN] Failed to initialize Gann Square of 9: {e}")
+            self.engine.gann = None
+
+    def _recover_engine_state_if_needed(self):
+        """Restores the engine's active position and locked strikes if restarting mid-day."""
+        try:
+            if self.engine_mode != "oi_flow":
+                return
+            open_pos = next((p for p in self.portfolio.get("open_positions", []) if p.get("engine") == "oi_flow_v1.1"), None)
+            if open_pos:
+                logger.info(f"[OI-Flow] Recovery: Restoring open position to engine: {open_pos}")
+                entry_time_dt = datetime.fromisoformat(open_pos["entry_time"]).astimezone(IST)
+                
+                direction = open_pos["direction"]
+                strikes = open_pos["strikes"]
+                
+                self.engine.position = {
+                    "direction": direction,
+                    "strikes": strikes,
+                    "entry_time": entry_time_dt,
+                    "entry_premiums": {int(k): float(v) for k, v in open_pos["entry_premiums"].items()},
+                    "entry_avg_premium": sum(open_pos["entry_premiums"].values()) / max(len(open_pos["entry_premiums"]), 1),
+                    "max_avg_premium": open_pos.get("max_avg_premium", sum(open_pos["entry_premiums"].values()) / max(len(open_pos["entry_premiums"]), 1)),
+                    "trade_num": open_pos.get("trade_num", 1),
+                    "signal_strength": open_pos.get("signal_strength", "single"),
+                    "target": open_pos.get("target"),
+                    "sl_spot": open_pos.get("sl_spot"),
+                    "tier1_done": open_pos.get("tier1_done", False),
+                    "lots_per_strike": {int(k): int(v) for k, v in open_pos.get("lots_per_strike", {}).items()}
+                }
+                self.engine._strikes_locked = True
+                if direction == "CE":
+                    self.engine.ce_fixed_strikes = strikes
+                    self.engine.pe_fixed_strikes = [s + 200 for s in strikes]
+                else:
+                    self.engine.pe_fixed_strikes = strikes
+                    self.engine.ce_fixed_strikes = [s - 200 for s in strikes]
+                self.engine.regime = "trending"
+                self.engine._regime_decided = True
+        except Exception as e:
+            logger.error(f"[OI-Flow] State recovery failed: {e}")
+
+    def _monitor_all_positions(self, now):
+        """Monitor all open positions. Closes any that hit SL/TP/time-stop."""
+        for pos in list(self.portfolio.get("open_positions", [])):
+            self._monitor_single_position(pos, now)
+
+    def _monitor_single_position(self, pos, now):
         strike = pos['strike']
         opt_type = pos['opt_type']
         token = pos.get('instrument_token')
@@ -348,7 +473,7 @@ class LiveOrchestrator:
         lots_sold = pos.get('lots_sold', 0)
 
         # ── Tiered Profit Booking (2026-05-26) ─────────────────────────
-        use_pct_scale = self.config.get("enable_3tf_filters", False) or self.opts.get("enable_3tf_filters", False)
+        use_pct_scale = self.config.get("enable_3tf_filters", self.opts.get("enable_3tf_filters", False))
         
         if use_pct_scale:
             # ── 5-Lot Partial Exit (Scale-Out) Strategy ──────────────────
@@ -425,7 +550,8 @@ class LiveOrchestrator:
 
         # If no remaining lots, close position
         if pos.get('remaining_lots', 0) <= 0:
-            self.portfolio["open_position"] = None
+            if pos in self.portfolio.get("open_positions", []):
+                self.portfolio["open_positions"].remove(pos)
             self.save_portfolio()
             return
 
@@ -465,7 +591,7 @@ class LiveOrchestrator:
                 exit_reason = active_reason
 
         if exit_reason:
-            self._close_position(exit_reason, exit_price=live_premium)
+            self._close_position(exit_reason, exit_price=live_premium, pos=pos)
             # ── Zone-inv guard: 2 consecutive → lock for day
             if "ZONE INVALIDATED" in exit_reason:
                 self._consecutive_zone_inv += 1
@@ -506,9 +632,291 @@ class LiveOrchestrator:
                     f"Remaining: {pos.get('remaining_lots', '?')} lots | "
                     f"Time: {int(time_held_mins)}m{tier_status}")
 
+    # ═══════════════════════════════════════════════════════════════
+    # OI-FLOW ENGINE TICK (v1.1)
+    # ═══════════════════════════════════════════════════════════════
+
+
+    def _execute_ic_entry(self, signal: dict, premiums: dict, now):
+        strikes = signal["strikes"]
+        lots = 12
+        self.engine.open_ic_position(signal, premiums, now, lots)
+        credit = signal.get("credit", 0.0)
+        logger.info(f"[OI-Flow] IRON CONDOR ENTRY | Credit: {credit:.1f} | Lots: {lots}")
+        trade = {
+            "entry_time": now.isoformat(),
+            "trade_type": "IRON_CONDOR",
+            "strike": 0,
+            "opt_type": "IC",
+            "entry_price": credit,
+            "qty": lots * self.lot_size,
+            "sl_price": credit * 1.5,
+            "target_price": credit * 0.5,
+        }
+        self.portfolio["open_position"] = trade
+
+    def _execute_ic_exit(self, reason: str, entry_credit: float, exit_cost: float, now):
+        lots = 12
+        if self.engine.ic_position:
+            lots = self.engine.ic_position.get("lots", 12)
+        pnl = (entry_credit - exit_cost) * lots * self.lot_size
+        ic_signal = {"close_cost": exit_cost, "reason": reason}
+        self.engine.close_ic_position(ic_signal, {}, now)
+        self.portfolio["capital"] += pnl
+        if "trade_history" not in self.portfolio:
+            self.portfolio["trade_history"] = []
+        trade = self.portfolio.get("open_position", {})
+        trade.update({
+            "exit_time": now.isoformat(),
+            "exit_price": exit_cost,
+            "pnl": pnl,
+            "reason": reason
+        })
+        self.portfolio["trade_history"].append(trade)
+        self.portfolio["open_position"] = None
+        logger.info(f"[OI-Flow] IRON CONDOR EXIT | Reason: {reason} | Exit Cost: {exit_cost:.1f} | P&L: Rs.{pnl:.0f}")
+
+    def _run_oi_flow_tick(self, now):
+        """Single tick for OI-Flow engine. Called every loop iteration."""
+        # Bug #4 fix: Don't lock strikes or process data before 09:20 IST.
+        # At 09:15 the OI/IV/PCR/premiums are all zero — let sellers and
+        # buyers take their positions first, then lock strikes on real data.
+        if now.time() < dtime(9, 20):
+            return
+
+        spot = self.fetcher.get_spot()
+        if spot <= 0:
+            return
+
+        # Ensure strikes are locked before building OI snapshot
+        if not self.engine._strikes_locked:
+            self.engine.lock_strikes(spot)
+
+        # Build OI snapshot and premiums for ALL fixed strikes.
+        # Bug #1+#5 fix: Previously premiums were only built when a position
+        # was already open, so the Theta Shield always saw 0 and locked
+        # down permanently. Also keys were integers (24000) but engine
+        # looks up strings ("24000_CE"). Now we always populate both.
+        oi_snapshot = {}
+        premiums = {}
+        try:
+            ltp_map = self.fetcher.get_ltp_map()
+            all_strikes = self.engine.ce_fixed_strikes + self.engine.pe_fixed_strikes
+            for s in all_strikes:
+                s_int = int(s)
+                ce_oi = self._get_option_oi(s_int, "CE")
+                pe_oi = self._get_option_oi(s_int, "PE")
+                oi_snapshot[s_int] = {"ce_oi": ce_oi, "pe_oi": pe_oi}
+                # Always feed premiums for BOTH CE and PE with string keys
+                premiums[f"{s_int}_CE"] = ltp_map.get(f"{s_int}_CE", 0)
+                premiums[f"{s_int}_PE"] = ltp_map.get(f"{s_int}_PE", 0)
+
+            # IC position premiums (if active)
+            if getattr(self.engine, 'ic_position', None):
+                for leg_key, s_val in self.engine.ic_position["strikes"].items():
+                    s_int = int(s_val)
+                    opt_dir = "CE" if "ce" in leg_key else "PE"
+                    premiums[f"{s_int}_{opt_dir}"] = ltp_map.get(f"{s_int}_{opt_dir}", 0)
+        except Exception as e:
+            logger.warning(f"OI-Flow snapshot build error: {e}")
+            return
+
+        # Main tick
+        actions = self.engine.tick(spot, now, oi_snapshot, premiums, self.fetcher)
+
+        if not actions:
+            return
+
+        for action in actions:
+            if action["action"] == "entry":
+                self._execute_oi_flow_entry(action, action.get("premiums", {}), now)
+            elif action["action"] == "exit":
+                self._execute_oi_flow_exit(action["reason"], premiums, now)
+            elif action["action"] == "partial_exit":
+                self._execute_oi_flow_partial(premiums, now)
+            elif action["action"] == "entry_ic":
+                self._execute_ic_entry(action, action.get("premiums", {}), now)
+            elif action["action"] == "exit_ic":
+                self._execute_ic_exit(action["reason"], action.get("credit", 0.0), action.get("exit_cost", 0.0), now)
+
+        # Save state
+        try:
+            state_file = f"data/oi_flow_state_{self.trading_index}.json"
+            self.engine.save_state(state_file)
+        except Exception as e:
+            logger.warning(f"Failed to save engine state: {e}")
+
+    def _get_option_oi(self, strike: int, opt_type: str) -> int:
+        """Get OI for a strike/type from fetcher's oi_map cache."""
+        oi_map = self.fetcher.get_oi_map()
+        return oi_map.get(f"{strike}_{opt_type}", 0)
+
+    def _execute_oi_flow_entry(self, signal: dict, premiums: dict, now):
+        """Place entry orders and record position."""
+        direction = signal["direction"]
+        strikes = signal["strikes"]
+        spot = signal["spot"]
+        size_mult = signal.get("size_multiplier", 1.0)
+
+        # Get real premiums from fetcher
+        ltp_map = self.fetcher.get_ltp_map()
+        real_premiums = {}
+        for s in strikes:
+            key = f"{int(s)}_{direction}"
+            ltp = ltp_map.get(key, 0)
+            if ltp <= 0:
+                logger.warning(f"[OI-Flow] No LTP for {key}, skipping entry")
+                return
+            real_premiums[int(s)] = ltp
+
+        # Compute lot allocation
+        lots = self.engine.compute_lot_allocation(real_premiums, size_mult)
+
+        # Open position in engine
+        self.engine.open_position(signal, real_premiums, now, lots)
+
+        # Record in portfolio
+        new_pos = {
+            "entry_time": now.isoformat(),
+            "trade_type": f"BUY {direction}",
+            "strikes": strikes,
+            "direction": direction,
+            "entry_premiums": real_premiums,
+            "lots_per_strike": lots,
+            "entry_spot": float(spot),
+            "engine": "oi_flow_v1.1",
+        }
+        self.portfolio.setdefault("open_positions", []).append(new_pos)
+        self.save_portfolio()
+
+        total_lots = sum(lots.values())
+        logger.info(f"[OI-Flow] ENTRY: {direction} | Strikes={strikes} "
+                    f"| Premiums={real_premiums} | Lots={lots} | Spot={spot:.0f}")
+        self.telegram.send_message(
+            f"OI-FLOW ENTRY\n"
+            f"Type: BUY {direction} | Strikes: {strikes}\n"
+            f"Premiums: {real_premiums}\n"
+            f"Lots: {lots} | Spot: {spot:.0f}\n"
+            f"OI Delta: {signal.get('oi_delta', 0):+.0f}"
+        )
+
+    def _execute_oi_flow_exit(self, reason: str, premiums: dict, now):
+        """Close position and record P&L."""
+        # Get real exit premiums
+        direction = self.engine.position["direction"]
+        ltp_map = self.fetcher.get_ltp_map()
+        exit_premiums = {}
+        for s in self.engine.position["strikes"]:
+            key = f"{int(s)}_{direction}"
+            exit_premiums[int(s)] = ltp_map.get(key, 0)
+
+        result = self.engine.close_position(reason, exit_premiums, now)
+        if result is None:
+            return
+
+        # Update portfolio
+        for pos in list(self.portfolio.get("open_positions", [])):
+            if pos.get("engine") == "oi_flow_v1.1":
+                self.portfolio["open_positions"].remove(pos)
+                self.portfolio["capital"] += result["total_pnl"]
+                # Record in trade history
+                self.portfolio.setdefault("trade_history", []).append({
+                    "entry_time": pos["entry_time"],
+                    "exit_time": now.isoformat(),
+                    "trade_type": pos["trade_type"],
+                    "strikes": pos["strikes"],
+                    "entry_premiums": pos["entry_premiums"],
+                    "exit_premiums": exit_premiums,
+                    "pnl": result["total_pnl"],
+                    "reason": reason,
+                    "engine": "oi_flow_v1.1",
+                })
+                break
+        self.save_portfolio()
+
+        logger.info(f"[OI-Flow] EXIT: {direction} | Reason={reason} "
+                    f"| P&L=Rs.{result['total_pnl']:+.0f} | "
+                    f"Hold={result['hold_minutes']:.0f}min")
+        self.telegram.send_message(
+            f"OI-FLOW EXIT\n"
+            f"Type: {direction} | Reason: {reason}\n"
+            f"P&L: Rs.{result['total_pnl']:+,.0f} | "
+            f"Hold: {result['hold_minutes']:.0f}min"
+        )
+
+    def _execute_oi_flow_partial(self, premiums: dict, now):
+        """Execute partial exit (50% scale-out of position)."""
+        direction = self.engine.position["direction"]
+        ltp_map = self.fetcher.get_ltp_map()
+
+        total_exit_pnl = 0.0
+        for s in self.engine.position["strikes"]:
+            key = f"{int(s)}_{direction}"
+            exit_ltp = ltp_map.get(key, 0)
+            entry_ltp = self.engine.entry_premiums.get(s, exit_ltp)
+            lots = self.engine.position.get("lots_per_strike", {}).get(s, 0)
+            if lots <= 0:
+                continue
+            exit_lots = max(1, int(lots * 0.5))
+            
+            pnl = (exit_ltp - entry_ltp) * exit_lots * self.lot_size
+            total_exit_pnl += pnl
+            
+            # Reduce the remaining lots in the engine
+            remaining = lots - exit_lots
+            if remaining > 0:
+                self.engine.position["lots_per_strike"][s] = remaining
+            else:
+                self.engine.position["lots_per_strike"].pop(s, None)
+
+        self.portfolio["capital"] += total_exit_pnl
+
+        logger.info(f"[OI-Flow] PARTIAL EXIT (50% Scale-Out) | P&L=Rs.{total_exit_pnl:+.0f} | "
+                    f"Runner SL moved to breakeven")
+        self.telegram.send_message(
+            f"OI-FLOW PARTIAL EXIT (50% Target Hit)\n"
+            f"Booked: Rs.{total_exit_pnl:+,.0f}\n"
+            f"Remaining 50% runner trailing at breakeven"
+        )
+        self.save_portfolio()
+
+    # ═══════════════════════════════════════════════════════════════
+
     def _scan_for_entries(self, now):
         # `now` is already an IST tz-aware datetime supplied by run()
         if now.time() < ENTRY_WINDOW_OPEN: return
+
+        # ---------------------------------------------------------------------
+        # 3:00 PM EXACT NIFTY STRADDLE (Expiry Day Only)
+        # ---------------------------------------------------------------------
+        if self.trading_index == "NIFTY":
+            now_dt = now.date()
+            if self.fetcher.get_expiry_date() == now_dt.isoformat():
+                # Trigger strictly between 15:00:00 and 15:00:59
+                if dtime(15, 0) <= now.time() < dtime(15, 1):
+                    if not self.portfolio.get("open_straddle") and self.portfolio.get("straddle_executed_today") != now_dt.isoformat():
+                        spot = self.fetcher.get_spot()
+                        if spot > 0:
+                            logger.info(f"dYY [EXPIRY STRADDLE] 3:00 PM Trigger Activated! Spot: {spot:.1f}")
+                            signal = {
+                                "direction": "CE",
+                                "reason": ["3_PM_EXPIRY_STRADDLE"],
+                                "is_straddle": True,
+                                "strike_offset": 0,
+                                "second_strike_offset": 0,
+                                "combined_sl_pct": 0.50,
+                                "tactic_name": "t2_expiry_straddle"
+                            }
+                            self._open_straddle_position(signal, now, spot)
+                            
+                            # Only mark as executed if the position successfully opened (premiums were valid)
+                            if self.portfolio.get("open_straddle"):
+                                self.portfolio["straddle_executed_today"] = now_dt.isoformat()
+                                self.save_portfolio()
+                            
+                            return
+
+        htf_state = "?"  # default — HTF scoring removed in v4.1, kept for log compat
 
         # ── Cooldown check (SL-triggered tactical pause) ────────────────
         if self._cooldown_until is not None:
@@ -543,6 +951,11 @@ class LiveOrchestrator:
             self._cooldown_until = None
             self._cooldown_reason = ""
             self._regime_lock_reasons = []
+            if hasattr(self, "engine") and self.engine is not None:
+                self.engine.trades_today = 0
+                self.engine.losses_today = 0
+                self.engine.last_trade_peak_spot = 0.0
+                self.engine.last_trade_trough_spot = float('inf')
             logger.info(f"[DAY-START] cap={self._session_start_capital:.0f}, "
                         f"drawdown breaker armed at -{self.daily_drawdown_pct*100:.1f}%")
         if self._positions_today_count >= self.max_positions_per_day:
@@ -585,57 +998,78 @@ class LiveOrchestrator:
         # positioning can signal a trend before price volatility confirms it.
         if self.engine_mode == "regime":
             try:
-                snap = self.dispatcher.indicators.snapshot()
-                tc_score = float(snap.get("trend_confidence", 0) or 0)
-                tc_dir = snap.get("trend_direction", "FLAT")
-                if 0 < tc_score < 0.5:
-                    # ── OI conviction override ──────────────────────────
-                    oi_override = False
-                    oi_override_dir = None
-                    try:
-                        oi = self.fetcher.get_oi_pattern()
-                        if oi and isinstance(oi, dict):
-                            ce_chg = abs(float(oi.get("ce_oi_change", 0) or 0))
-                            pe_chg = abs(float(oi.get("pe_oi_change", 0) or 0))
-                            # PE writers building faster → bullish conviction
-                            if ce_chg > 0 and pe_chg > 0:
-                                pe_ce_ratio = pe_chg / ce_chg
-                                if pe_ce_ratio >= 1.30:
-                                    oi_override = True
-                                    oi_override_dir = "CE"
-                                elif pe_ce_ratio <= 0.70:
-                                    oi_override = True
-                                    oi_override_dir = "PE"
-                    except Exception:
-                        pass
+                # ── PCR BYPASS ───────────────────────────────────────
+                # Two ways to bypass chop guard:
+                #  1. PCR data missing (0 or None) → bypass, trust gut
+                #  2. PCR in CE range (0.85-1.60) or PE range (0.40-1.15)
+                #     → PCR confirms direction, price chop is noise
+                current_pcr = self.fetcher.get_focus_pcr()
+                
+                # CE range: 0.85 - 1.60, PE range: 0.40 - 1.15
+                pcr_in_ce_range = 0.85 <= current_pcr <= 1.60
+                pcr_in_pe_range = 0.40 <= current_pcr <= 1.15
+                
+                if current_pcr <= 0:
+                    logger.info(
+                        f"[CHOP GUARD] PCR data missing (PCR={current_pcr}) — "
+                        f"bypassing chop guard. Gut mode. Spot {spot:.1f}"
+                    )
+                elif pcr_in_ce_range or pcr_in_pe_range:
+                    pcr_zone = "CE" if pcr_in_ce_range else "PE"
+                    logger.info(
+                        f"[CHOP GUARD] PCR={current_pcr:.2f} in {pcr_zone} range "
+                        f"(CE:0.85-1.60, PE:0.40-1.15) — "
+                        f"bypassing chop guard. PCR confirms direction. Spot {spot:.1f}"
+                    )
+                else:
+                    snap = self.dispatcher.indicators.snapshot()
+                    tc_score = float(snap.get("trend_confidence", 0) or 0)
+                    tc_dir = snap.get("trend_direction", "FLAT")
+                    if 0 < tc_score < 0.5:
+                        # ── OI conviction override ──────────────────────────
+                        oi_override = False
+                        oi_override_dir = None
+                        try:
+                            oi = self.fetcher.get_oi_pattern()
+                            if oi and isinstance(oi, dict):
+                                ce_chg = abs(float(oi.get("ce_oi_change", 0) or 0))
+                                pe_chg = abs(float(oi.get("pe_oi_change", 0) or 0))
+                                # PE writers building faster → bullish conviction
+                                if ce_chg > 0 and pe_chg > 0:
+                                    pe_ce_ratio = pe_chg / ce_chg
+                                    if pe_ce_ratio >= 1.30:
+                                        oi_override = True
+                                        oi_override_dir = "CE"
+                                    elif pe_ce_ratio <= 0.70:
+                                        oi_override = True
+                                        oi_override_dir = "PE"
+                        except Exception:
+                            pass
 
-                    if oi_override and oi_override_dir:
-                        logger.info(
-                            f"[CHOP GUARD] Trend confidence {tc_score:.2f}x ({tc_dir}) "
-                            f"OVERRIDDEN — OI conviction {oi_override_dir} "
-                            f"(PE/CE OI ratio). Spot {spot:.1f}"
-                        )
-                    else:
-                        logger.info(
-                            f"[CHOP GUARD] Trend confidence {tc_score:.2f}x ({tc_dir}) "
-                            f"below 0.5 — skipping entry scan. Spot {spot:.1f}"
-                        )
-                        return
+                        if oi_override and oi_override_dir:
+                            logger.info(
+                                f"[CHOP GUARD] Trend confidence {tc_score:.2f}x ({tc_dir}) "
+                                f"OVERRIDDEN — OI conviction {oi_override_dir} "
+                                f"(PE/CE OI ratio). Spot {spot:.1f}"
+                            )
+                        else:
+                            logger.info(
+                                f"[CHOP GUARD] Trend confidence {tc_score:.2f}x ({tc_dir}) "
+                                f"below 0.5 — skipping entry scan. Spot {spot:.1f}"
+                            )
+                            return
             except Exception as e:
                 logger.debug(f"trend-confidence check failed: {e}")
 
-        # Dispatcher abstracts: legacy mode -> SignalEngine.evaluate; regime
-        # mode -> classifier+router+tactics with fallback to SignalEngine for
-        # RANGE regime. Returns the same legacy-shaped dict either way.
+        # Dispatcher: legacy mode -> SignalEngine.evaluate; regime mode -> classifier+router
         signal = self.dispatcher.evaluate(
             ts=now,
             fetcher=self.fetcher,
             engine=self.engine,
-            in_position=bool(self.portfolio["open_position"]),
+            in_position=len(self.portfolio.get("open_positions", [])) > 0,
         )
 
-        # Register any near-misses surfaced by the dispatcher with the
-        # live missed-tracker. Wrapped to never affect trading flow.
+        # Register any near-misses surfaced by the dispatcher
         for nm in signal.get('near_misses', []):
             self._register_near_miss_safely(nm)
 
@@ -648,8 +1082,7 @@ class LiveOrchestrator:
             "near_miss_count": len(signal.get('near_misses', [])),
         }
 
-        # T2: straddle signals are routed to a separate two-leg entry path
-        # so the existing single-leg position-management logic stays intact.
+        # T2: straddle signals
         if signal.get('is_straddle'):
             self._open_straddle_position(signal, now, spot)
             return
@@ -659,12 +1092,12 @@ class LiveOrchestrator:
 
             # PR 2: regime lock from consecutive-loss or zone-inv diagnostic
             if self._regime_lock == "NO_TRADE":
-                return  # zone structure broken for the day
+                return
             if self._regime_lock == "CE_ONLY" and direction == "PE":
-                logger.info(f"[REGIME LOCK] PE blocked — classifier locked CE_ONLY")
+                logger.info(f"[REGIME LOCK] PE blocked")
                 return
             if self._regime_lock == "PE_ONLY" and direction == "CE":
-                logger.info(f"[REGIME LOCK] CE blocked — classifier locked PE_ONLY")
+                logger.info(f"[REGIME LOCK] CE blocked")
                 return
 
             # ── ITM strike selection (2026-05-26) ──────────────────────────
@@ -717,9 +1150,10 @@ class LiveOrchestrator:
                 logger.info(f"Signal Generated ({direction}) but ATM Delta is too low ({delta:.2f}). Rejecting.")
                 return
 
-            # ── Fixed 5-lot position with tiered profit booking (2026-05-26) ──
-            use_pct_scale = self.config.get("enable_3tf_filters", False) or self.opts.get("enable_3tf_filters", False)
+            # ── Fixed 5-lot position with tiered profit booking ──
+            use_pct_scale = self.config.get("enable_3tf_filters", self.opts.get("enable_3tf_filters", False))
             TOTAL_LOTS = int(self.opts.get("fixed_lots_to_trade", 5)) if use_pct_scale else 5
+            size_tag = "FULL" if TOTAL_LOTS >= 5 else "REDUCED"  # v4.1: simplified from HTF scoring
             
             TIER1_PTS = 20
             TIER2_PTS = 35
@@ -730,10 +1164,19 @@ class LiveOrchestrator:
             qty = self.lot_size * TOTAL_LOTS
             is_expiry = signal['is_expiry_day']
             
-            if use_pct_scale:
-                sl_pct = float(self.opts.get("scale_out_hard_sl_percent", 20)) / 100.0
+            # ── Tiered SL based on entry premium ──────────────────────
+            # Expensive ITM strikes (≥₹100): tight 12% — moves with delta
+            # Mid-range (₹70-100): 15%
+            # Near ATM (₹40-70): 20%
+            # Cheap OTM (<₹40): 25% — needs room for volatility
+            if live_premium >= 100:
+                sl_pct = 0.12
+            elif live_premium >= 70:
+                sl_pct = 0.15
+            elif live_premium >= 40:
+                sl_pct = 0.20
             else:
-                sl_pct = signal.get('tactic_sl_pct') or (0.15 if is_expiry else 0.15)
+                sl_pct = 0.25
                 
             time_stop_min = signal.get('tactic_time_stop_min', 45 if is_expiry else 120)
             tgt_pct = signal.get('tactic_tp_pct') or (0.35 if is_expiry else 0.50)
@@ -746,7 +1189,7 @@ class LiveOrchestrator:
             # PR 3: snapshot entry-time PCR + focus-zone OI so the
             # active-management exits have a baseline to compare against.
             entry_oi = self.fetcher.get_oi_pattern() or {}
-            self.portfolio["open_position"] = {
+            new_position = {
                 "entry_time": now.isoformat(),
                 "trade_type": f"BUY {direction}",
                 "strike": best_strike,
@@ -772,7 +1215,11 @@ class LiveOrchestrator:
                 "entry_spot": float(spot),
                 "entry_total_ce_oi": float(entry_oi.get("total_ce_oi", 0) or 0),
                 "entry_total_pe_oi": float(entry_oi.get("total_pe_oi", 0) or 0),
+                "htf_state": htf_state,
+                "event_type": signal.get('event_type', 'bos'),
+                "event_dir": signal.get('event_dir', direction.lower()),
             }
+            self.portfolio.setdefault("open_positions", []).append(new_position)
             self.save_portfolio()
 
             # Journal: record entry
@@ -810,22 +1257,19 @@ class LiveOrchestrator:
                 RUNNER_TP_PCT = float(self.opts.get("scale_out_runner_percent", 30))
                 HARD_SL_PCT = float(self.opts.get("scale_out_hard_sl_percent", 20))
                 
-                msg = (f"🚀 PAPER TRADE ENTERED (3TF Momentum)\n"
+                msg = (f"🚀 PAPER TRADE ENTERED (PriceActionBot)\n"
                        f"Type: BUY {best_strike} {direction} [{itm_tag}]\n"
-                       f"Entry: Rs. {live_premium:.2f} x {TOTAL_LOTS} lots\n"
+                       f"Entry: Rs. {live_premium:.2f} x {TOTAL_LOTS} lots | HTF: {htf_state.upper()} ({size_tag})\n"
                        f"Zone: S={sup} → R={res}\n"
                        f"Scale-out: +{SCALE_TP_PCT:.0f}% (Sell 3 lots) → SL to BE\n"
                        f"Runner: +{RUNNER_TP_PCT:.0f}% (Sell 2 lots)\n"
-                       f"Stop Loss: -{HARD_SL_PCT:.0f}% (Rs. {sl_prem:.2f})\n"
+                       f"Stop Loss: -{sl_pct*100:.0f}% (Rs. {sl_prem:.2f})\n"
                        f"Reason: {signal['reasons'][0]}")
             else:
-                msg = (f"🚀 PAPER TRADE ENTERED\n"
+                msg = (f"🚀 PAPER TRADE ENTERED (PriceActionBot)\n"
                        f"Type: BUY {best_strike} {direction} [{itm_tag}]\n"
-                       f"Entry: Rs. {live_premium:.2f} x {TOTAL_LOTS} lots\n"
+                       f"Entry: Rs. {live_premium:.2f} x {TOTAL_LOTS} lots | HTF: {htf_state.upper()}\n"
                        f"Zone: S={sup} → R={res}\n"
-                       f"Tier1: +{TIER1_PTS}pts → sell {TIER1_LOTS} lots | "
-                       f"Tier2: +{TIER2_PTS}pts → sell {TIER2_LOTS} lot | "
-                       f"Trail: {TRAIL_LOTS} lot at cost\n"
                        f"SL: Rs. {sl_prem:.2f} | Delta: {delta:.2f}\n"
                        f"Reason: {signal['reasons'][0]}")
             
@@ -833,7 +1277,7 @@ class LiveOrchestrator:
             self.telegram.send_message(msg)
         else:
             reason_summary = signal['reasons'][0] if signal['reasons'] else "No signal"
-            logger.info(f"Scanning... FocusPCR: {focus_pcr:.2f} | S:{sup} R:{res} | Spot: {spot:.0f} | {reason_summary}")
+            logger.info(f"Scanning... Spot: {spot:.0f} | HTF: {signal.get('htf_state', '?')} | {reason_summary}")
 
 
     def _check_active_exits(self, now, pos, live_premium, time_held_mins):
@@ -1078,8 +1522,13 @@ class LiveOrchestrator:
         except Exception as e:
             return {"can_trade": False, "reason": f"reassess error: {e}"}
 
-    def _close_position(self, reason, exit_price=None):
-        pos = self.portfolio["open_position"]
+    def _close_position(self, reason, exit_price=None, pos=None):
+        if pos is None:
+            # Legacy: close first open position
+            positions = self.portfolio.get("open_positions", [])
+            if not positions:
+                return
+            pos = positions[0]
         if exit_price is None:
             exit_price = self.fetcher.get_option_ltp(pos['strike'], pos['opt_type'])
 
@@ -1137,7 +1586,8 @@ class LiveOrchestrator:
                     and self._regime_lock is None):
                 try:
                     spot_hist = self.fetcher.get_spot_history()
-                    pcr_oi_hist = self.engine._history
+                    # PriceActionBot has _history for compatibility
+                    pcr_oi_hist = getattr(self.engine, '_history', deque())
                     reading = classify_regime(spot_hist, pcr_oi_hist)
                     self._regime_lock_reasons = list(reading.reasons)
                     if reading.is_chop:
@@ -1156,7 +1606,9 @@ class LiveOrchestrator:
         else:
             self._consecutive_losses = 0
 
-        self.portfolio["open_position"] = None
+        # Remove this position from open_positions
+        if pos in self.portfolio.get("open_positions", []):
+            self.portfolio["open_positions"].remove(pos)
         self.save_portfolio()
         return  # avoid falling into the next method
 
@@ -1893,8 +2345,8 @@ class LiveOrchestrator:
                 except Exception:
                     pass
 
-            pos = self.portfolio.get("open_position")
-            in_position = pos is not None
+            open_positions = self.portfolio.get("open_positions", [])
+            in_position = len(open_positions) > 0
 
             n_missed = 0
             if self.journal is not None and self._journal_day_started:
@@ -1927,7 +2379,8 @@ class LiveOrchestrator:
                 "ce_oi_change": float(ce_oi or 0),
                 "pe_oi_change": float(pe_oi or 0),
                 "in_position": in_position,
-                "open_position": pos,
+                "open_positions": open_positions,
+                "position_count": len(open_positions),
                 "last_signal": self._last_signal,
                 "missed_today_count": n_missed,
                 "is_market_open": is_market_open,
@@ -1944,7 +2397,7 @@ class LiveOrchestrator:
                 "h4_ema": h4_ema,
                 "h1_ema": h1_ema,
                 "m15_ema": m15_ema,
-                "enable_3tf_filters": self.config.get("enable_3tf_filters", False) or self.opts.get("enable_3tf_filters", False),
+                "enable_3tf_filters": self.config.get("enable_3tf_filters", self.opts.get("enable_3tf_filters", False)),
             }
             self.state_publisher.write_engine_state(engine_state)
 
