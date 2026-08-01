@@ -318,7 +318,7 @@ class OIFlowEngine:
 
         # ── Check entry ──
         if self.position is None and self._regime_decided:
-            entry_action = self._check_entry(spot, ts, oi_snapshot, fetcher)
+            entry_action = self._check_entry(spot, ts, oi_snapshot, premiums, fetcher)
             if entry_action:
                 signals.append(entry_action)
                 
@@ -345,6 +345,7 @@ class OIFlowEngine:
                 result = self.seller_bot.close_sell_position(
                     sell_exit["reason"], premiums, ts
                 )
+                sell_exit.update(result)
                 signals.append(sell_exit)
 
         # Monitor active hedge for exit
@@ -354,6 +355,7 @@ class OIFlowEngine:
                 result = self.seller_bot.close_hedge_position(
                     premiums, ts, hedge_exit["reason"]
                 )
+                hedge_exit.update(result)
                 signals.append(hedge_exit)
 
         return signals
@@ -415,7 +417,7 @@ class OIFlowEngine:
     # ENTRY LOGIC
     # ═══════════════════════════════════════════════════════════════
 
-    def _check_entry(self, spot: float, ts: datetime, oi_snapshot: dict, fetcher=None) -> Optional[dict]:
+    def _check_entry(self, spot: float, ts: datetime, oi_snapshot: dict, premiums: dict, fetcher=None) -> Optional[dict]:
         if self.position is not None:
             return None
         # Determine if any entry trigger is physically breached on this tick (before checking safety filters)
@@ -506,7 +508,6 @@ class OIFlowEngine:
         active_res = None
         active_sup = None
         
-        # Find the nearest resistance above spot, and support below spot
         for res in sorted(resistances):
             if res >= spot:
                 active_res = res
@@ -517,50 +518,60 @@ class OIFlowEngine:
                 active_sup = sup
                 break
                 
-        # If no structural levels found from CSV, fallback to Gann
         if active_res is None or active_sup is None:
             if not self.gann or not self.ce_trigger or not self.ce_sl:
                 return None
             active_res = self.ce_trigger
             active_sup = self.ce_sl
 
-        # Dynamic ATM Strike for OI check
         atm = round(spot / self.strike_step) * self.strike_step
+        step = self.strike_step
+
+        # --- VIX Strike Selection Logic ---
+        vix_is_low = False
+        if fetcher:
+            try:
+                vix = fetcher.get_india_vix()
+                if vix > 0 and vix < 12.5:
+                    vix_is_low = True
+            except:
+                pass
+                
+        # Define strikes based on VIX
+        if self.daily_bias == "CE":
+            ce_strikes = [atm - 3 * step, atm - 2 * step, atm - step] if vix_is_low else [atm - 2 * step, atm - step, atm]
+        else:
+            pe_strikes = [atm + 3 * step, atm + 2 * step, atm + step] if vix_is_low else [atm + 2 * step, atm + step, atm]
 
         if not self.flip_triggered:
             if self.daily_bias == "CE":
-                # Looking to buy Support (Reversal)
-                if active_sup and (spot <= active_sup + 10.0 and spot >= active_sup - 10.0):
-                    # Pillar 2: Live OI Confirmation
+                # --- PREMIUM DRIVEN ENTRY ---
+                prem_levels = self.analyzer.get_premium_historical_levels(ce_strikes[0], "CE")
+                prem_floor = prem_levels.get("support", 0)
+                current_prem = premiums.get(f"{ce_strikes[0]}_CE", 0)
+                
+                # Enter strictly if Premium is at or below its historical support floor (+5% buffer)
+                if current_prem > 0 and current_prem <= (prem_floor * 1.05):
                     oi_status = self.analyzer.get_live_oi_change(atm, window_minutes=15)
                     if oi_status == "REVERSAL_CONFIRMED":
-                        # Pillar 3: Premium Support Check
-                        prem_levels = self.analyzer.get_premium_historical_levels(atm - self.strike_step, "CE")
-                        prem_floor = prem_levels.get("support", 0)
-                        
                         direction = "CE"
                         position_target = active_res
-                        reason = f"PILLAR ENTRY: Buy CE at {spot:.1f} (Structural Sup {active_sup:.1f}, OI Reversal)"
+                        reason = f"PILLAR ENTRY: CE Premium near Floor ({current_prem:.1f} vs {prem_floor:.1f}) & OI Reversal"
                         self.max_spot_in_trade = spot
-                    elif oi_status == "BREAKOUT_WARNING":
-                        log.info(f"Spot at Support {active_sup}, but OI warns of Breakdown. Aborting CE.")
                         
             elif self.daily_bias == "PE":
-                # Looking to sell Resistance (Reversal)
-                if active_res and (spot >= active_res - 10.0 and spot <= active_res + 10.0):
-                    # Pillar 2: Live OI Confirmation
+                prem_levels = self.analyzer.get_premium_historical_levels(pe_strikes[0], "PE")
+                prem_floor = prem_levels.get("support", 0)
+                current_prem = premiums.get(f"{pe_strikes[0]}_PE", 0)
+                
+                # Enter strictly if Premium is at or below its historical support floor (+5% buffer)
+                if current_prem > 0 and current_prem <= (prem_floor * 1.05):
                     oi_status = self.analyzer.get_live_oi_change(atm, window_minutes=15)
                     if oi_status == "REVERSAL_CONFIRMED":
-                        # Pillar 3: Premium Support Check
-                        prem_levels = self.analyzer.get_premium_historical_levels(atm + self.strike_step, "PE")
-                        prem_floor = prem_levels.get("support", 0)
-                        
                         direction = "PE"
                         position_target = active_sup
-                        reason = f"PILLAR ENTRY: Buy PE at {spot:.1f} (Structural Res {active_res:.1f}, OI Reversal)"
+                        reason = f"PILLAR ENTRY: PE Premium near Floor ({current_prem:.1f} vs {prem_floor:.1f}) & OI Reversal"
                         self.min_spot_in_trade = spot
-                    elif oi_status == "BREAKOUT_WARNING":
-                        log.info(f"Spot at Resistance {active_res}, but OI warns of Breakout. Aborting PE.")
         else:
             if self.daily_bias == "CE":
                 direction = "CE"
@@ -577,6 +588,7 @@ class OIFlowEngine:
 
         if direction is None:
             return None
+            
         # ENFORCE NIFTY MASTER FILTER
         if nifty_bias == "BEARISH" and direction == "CE":
             log.info(f"[OI-Flow] CE Entry blocked because Nifty Master OI is BEARISH.")
@@ -585,24 +597,13 @@ class OIFlowEngine:
             log.info(f"[OI-Flow] PE Entry blocked because Nifty Master OI is BULLISH.")
             return None
 
-
-        # Dynamic ATM/ITM Strike Selection at the moment of entry
-        # This prevents trading illiquid, deep-ITM option strikes when the market moves heavily.
-        atm = round(spot / self.strike_step) * self.strike_step
-        step = self.strike_step
-        if direction == "CE":
-            # Buy ITM Calls (Strikes <= Spot)
-            strikes = [atm - 2 * step, atm - step, atm]
-        else:
-            # Buy ITM Puts (Strikes >= Spot)
-            strikes = [atm + 2 * step, atm + step, atm]
+        strikes = ce_strikes if direction == "CE" else pe_strikes
 
         # Pillar 4 Setup: Map the Premium target and True Premium Floor
         premium_target_price = 0.0
         premium_floor_sl = 0.0
         if direction == "CE" and active_res:
             premium_target_price = self.analyzer.get_premium_at_spot_level(strikes[0], "CE", active_res)
-            # Find the true historical support floor for this premium
             prem_levels = self.analyzer.get_premium_historical_levels(strikes[0], "CE")
             premium_floor_sl = prem_levels.get("support", 0.0)
         elif direction == "PE" and active_sup:
