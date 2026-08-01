@@ -28,6 +28,9 @@ from collections import deque
 from pathlib import Path
 from typing import Optional
 
+from premium_analyzer import PremiumAnalyzer
+from option_seller_bot import OptionSellerBot
+
 log = logging.getLogger("OIFlow")
 
 
@@ -128,11 +131,14 @@ class OIFlowEngine:
         self._prem_ema_slow: dict = {}  # strike_key -> ema value
         self._last_prem_ema_ts: Optional[datetime] = None
 
-        # ── Theta Decay Filter ──
+        # ── Theta Decay / Volatility Compression Filter ──
         self._theta_lockdown_until: Optional[datetime] = None
-        self._recent_spots = deque(maxlen=5)
-        self._recent_ces = deque(maxlen=5)
-        self._recent_pes = deque(maxlen=5)
+        self._recent_spots = deque(maxlen=15)
+        self._recent_ces = deque(maxlen=15)
+        self._recent_pes = deque(maxlen=15)
+
+        # ── Option Seller Bot (Theta Harvester) ──
+        self.seller_bot = OptionSellerBot(config)
         self._last_theta_ts: Optional[datetime] = None
 
         self.fetcher = None
@@ -144,8 +150,20 @@ class OIFlowEngine:
         self.ce_target: float = 0.0
         self.ce_sl: float = 0.0
         self.pe_trigger: float = 0.0
-        self.pe_target: float = 0.0
         self.pe_sl: float = 0.0
+
+        # ── Tape-Reading Engine (Pillars 1-4) ──
+        self.analyzer = PremiumAnalyzer(index=config.get("trading_index", "NIFTY"))
+        self._cached_spot_levels = None
+        self._cached_spot_ts = None
+
+        # ── Daily Bias & Reversal Flip variables ──
+        self.daily_bias: Optional[str] = None
+        self.bias_desc: str = ""
+        self.flip_triggered: bool = False
+        self.max_spot_in_trade: float = 0.0
+        self.min_spot_in_trade: float = float('inf')
+        self.reversal_exit_spot: Optional[float] = None
 
         log.info(f"OIFlowEngine v6 ready | Thresh={self.signal_threshold} | "
                  f"MinRange={self.min_range} | MaxTrades={self.max_trades}")
@@ -164,6 +182,18 @@ class OIFlowEngine:
         self._strikes_locked = True
         self.open_spot = spot
         self.morning_low = spot  # reset for morning tracking
+        
+        # Initialize Daily Bias based on Gap vs Previous Close
+        if self.gann and hasattr(self.gann, 'base_price') and self.gann.base_price > 0:
+            if spot > self.gann.base_price:
+                self.daily_bias = "CE"
+                self.bias_desc = "BULLISH (Gap Up)"
+            else:
+                self.daily_bias = "PE"
+                self.bias_desc = "BEARISH (Gap Down)"
+            log.info(f"[BIAS] Official Prev Close: {self.gann.base_price:.2f} | Open: {spot:.2f} | Bias: {self.bias_desc}")
+        else:
+            self.daily_bias = "CE" # Fallback if base_price not loaded
         
         # Lock regime as trending for pure Gann level breakouts from 09:20 AM
         self.regime = "trending"
@@ -210,10 +240,17 @@ class OIFlowEngine:
         self._update_ema(spot, ts)
         self._update_premium_emas(premiums, ts)
 
-        # ── Theta Decay Filter ──
-        if self._strikes_locked:
-            ce_prem_sum = sum(premiums.get(f"{int(s)}_CE", 0) for s in self.ce_fixed_strikes)
-            pe_prem_sum = sum(premiums.get(f"{int(s)}_PE", 0) for s in self.pe_fixed_strikes)
+        t_str = ts.strftime("%H:%M")
+        
+        # Calculate LIVE ATM tracking strikes on every tick
+        atm = round(spot / self.strike_step) * self.strike_step
+        live_ce = [atm - 3 * self.strike_step, atm - 2 * self.strike_step, atm - self.strike_step]
+        live_pe = [atm + self.strike_step, atm + 2 * self.strike_step, atm + 3 * self.strike_step]
+
+        # ── Theta Decay / Volatility Compression Filter ──
+        if t_str >= "09:20":
+            ce_prem_sum = sum(premiums.get(f"{int(s)}_CE", 0) for s in live_ce)
+            pe_prem_sum = sum(premiums.get(f"{int(s)}_PE", 0) for s in live_pe)
             
             # Sample every ~60 seconds
             if not self._last_theta_ts or (ts - self._last_theta_ts).total_seconds() >= 55:
@@ -222,48 +259,40 @@ class OIFlowEngine:
                 self._recent_ces.append(ce_prem_sum)
                 self._recent_pes.append(pe_prem_sum)
                 
-                if len(self._recent_spots) == 5:
+                # Check for Volatility Crush / Premium Compression over the last 15 minutes
+                if len(self._recent_spots) == 15:
                     spot_min, spot_max = min(self._recent_spots), max(self._recent_spots)
-                    ce_min, ce_max = min(self._recent_ces), max(self._recent_ces)
-                    pe_min, pe_max = min(self._recent_pes), max(self._recent_pes)
-                    
                     spot_range = spot_max - spot_min
                     
-                    # 1. Divergence check (Spot moves, Premium flat)
-                    if spot_range >= 15 and (ce_max - ce_min) < 3 and (pe_max - pe_min) < 3:
-                        self._theta_lockdown_until = ts + timedelta(minutes=15)
-                        log.info(f"[{ts.strftime('%H:%M')}] THETA LOCKDOWN: Spot range {spot_range:.1f} but Prem range < 3")
-                    # 2. Sideways decay check (Premium breaking lows in small range)
-                    elif spot_range < 15 and self.regime == "sideways":
-                        if ce_prem_sum <= ce_min and pe_prem_sum <= pe_min:
-                            self._theta_lockdown_until = ts + timedelta(minutes=15)
-                            log.info(f"[{ts.strftime('%H:%M')}] THETA LOCKDOWN: Sideways decay (Premium breaking lows)")
-
+                    # Calculate peak straddle premium over the window
+                    straddles = [c + p for c, p in zip(self._recent_ces, self._recent_pes)]
+                    peak_straddle = max(straddles)
+                    current_straddle = straddles[-1]
+                    
+                    # If combined premium decayed by > 3% in 15 mins without a directional spot breakout
+                    straddle_decay_pct = (peak_straddle - current_straddle) / max(peak_straddle, 1)
+                    if straddle_decay_pct > 0.03 and spot_range < 30:
+                        self._theta_lockdown_until = ts + timedelta(minutes=5)
+                        msg = f"[{t_str}] VOLATILITY CRUSH: Straddle decayed {straddle_decay_pct*100:.1f}%. Locking out entries."
+                        log.info(msg)
+                        print(msg)
+                        
         # ── Track morning range (till entry_time) ──
         t_str = ts.strftime("%H:%M")
-        if t_str <= self.regime_time:
-            if spot > self.morning_high:
-                self.morning_high = spot
-            if spot < self.morning_low:
-                self.morning_low = spot
 
         # ── Capture OI at key times ──
         self._capture_oi_snapshots(oi_snapshot, ts, t_str)
 
-        # ── At entry_time: decide regime ──
-        if t_str >= self.regime_time and not self._regime_decided:
-            self.morning_range = self.morning_high - self.morning_low
-            self._decide_regime(spot)
-            self._regime_decided = True
-
         # ── Check exit (always check, position might exist) ──
         if self.position:
-            # Track peak/trough spot
+            # Track peak/trough spot for 15-point reversal
             p_dir = self.position["direction"]
             if p_dir == "CE":
-                self.position["peak_spot"] = max(self.position.get("peak_spot", spot), spot)
+                if spot > self.max_spot_in_trade:
+                    self.max_spot_in_trade = spot
             else:
-                self.position["trough_spot"] = min(self.position.get("trough_spot", spot), spot)
+                if spot < self.min_spot_in_trade:
+                    self.min_spot_in_trade = spot
 
             exit_action = self._check_exit(spot, ts, premiums, fetcher)
             if exit_action:
@@ -273,6 +302,19 @@ class OIFlowEngine:
             ic_exit_action = self._check_ic_exit(spot, ts, premiums, fetcher)
             if ic_exit_action:
                 signals.append(ic_exit_action)
+
+        # ── Check for Reversal Flip (12pt Confirmation) ──
+        if self.position is None and self.reversal_exit_spot is not None:
+            if self.daily_bias == "CE" and spot <= self.reversal_exit_spot - 12.0:
+                log.info(f"[{t_str}] 12pt CONFIRMATION -> FLIPPING TO PE")
+                self.daily_bias = "PE"
+                self.flip_triggered = True
+                self.reversal_exit_spot = None
+            elif self.daily_bias == "PE" and spot >= self.reversal_exit_spot + 12.0:
+                log.info(f"[{t_str}] 12pt CONFIRMATION -> FLIPPING TO CE")
+                self.daily_bias = "CE"
+                self.flip_triggered = True
+                self.reversal_exit_spot = None
 
         # ── Check entry ──
         if self.position is None and self._regime_decided:
@@ -284,6 +326,35 @@ class OIFlowEngine:
             ic_entry_action = self._check_ic_entry(spot, ts, premiums, fetcher)
             if ic_entry_action:
                 signals.append(ic_entry_action)
+
+        # ═══ OPTION SELLER BOT ═══
+        # Mode 1: Volatility Crush — sell straddle/strangle during theta lockdown
+        is_locked = bool(self._theta_lockdown_until and ts < self._theta_lockdown_until)
+        if self.seller_bot.sell_position is None and is_locked:
+            crush_signal = self.seller_bot.check_crush_entry(
+                spot, ts, premiums, is_locked, self.analyzer
+            )
+            if crush_signal:
+                self.seller_bot.open_sell_position(crush_signal, ts)
+                signals.append(crush_signal)
+
+        # Monitor active sell position for exit
+        if self.seller_bot.sell_position is not None:
+            sell_exit = self.seller_bot.check_sell_exit(spot, ts, premiums)
+            if sell_exit:
+                result = self.seller_bot.close_sell_position(
+                    sell_exit["reason"], premiums, ts
+                )
+                signals.append(sell_exit)
+
+        # Monitor active hedge for exit
+        if self.seller_bot.hedge_position is not None:
+            hedge_exit = self.seller_bot.check_hedge_exit(spot, ts, premiums)
+            if hedge_exit:
+                result = self.seller_bot.close_hedge_position(
+                    premiums, ts, hedge_exit["reason"]
+                )
+                signals.append(hedge_exit)
 
         return signals
 
@@ -347,29 +418,59 @@ class OIFlowEngine:
     def _check_entry(self, spot: float, ts: datetime, oi_snapshot: dict, fetcher=None) -> Optional[dict]:
         if self.position is not None:
             return None
-            
+        # Determine if any entry trigger is physically breached on this tick (before checking safety filters)
+        potential_signal = None
+
         if self.losses_today >= 3:
+            if potential_signal:
+                log.info(f"[OI-Flow] Trigger {potential_signal} breached but entry blocked by: 3-Loss Daily Limit.")
             return None
+
+        if self._theta_lockdown_until and ts < self._theta_lockdown_until:
+            if potential_signal:
+                log.info(f"[OI-Flow] Trigger {potential_signal} breached but entry blocked by: 15-Min Cooldown.")
+            return None
+
+        # --- NIFTY MASTER OI FILTER ---
+        nifty_bias = None
+        try:
+            import pandas as pd
+            import os
+            date_str = ts.strftime("%Y-%m-%d")
+            nifty_csv = f"C:/Users/shaik/OneDrive/Desktop/New folder/nifty-sniper-bot/logs/macro_NIFTY_{date_str}.csv"
+            if os.path.exists(nifty_csv):
+                if not hasattr(self, 'nifty_macro_df') or getattr(self, 'nifty_macro_date', None) != date_str:
+                    self.nifty_macro_df = pd.read_csv(nifty_csv)
+                    self.nifty_macro_df['timestamp'] = pd.to_datetime(self.nifty_macro_df['timestamp'])
+                    self.nifty_macro_date = date_str
+                
+                df = self.nifty_macro_df
+                past_df = df[df['timestamp'] <= ts]
+                if not past_df.empty:
+                    last_row = past_df.iloc[-1]
+                    ce_chg = last_row.get("CE-OI-Chg", 0)
+                    pe_chg = last_row.get("PE-OI-Chg", 0)
+                    if ce_chg > pe_chg * 1.2:
+                        nifty_bias = "BEARISH"
+                    elif pe_chg > ce_chg * 1.2:
+                        nifty_bias = "BULLISH"
+        except Exception as e:
+            pass
+
 
         # VIX Momentum Filter: Block entries if VIX is below 12.5
         if fetcher:
             try:
                 vix = fetcher.get_india_vix()
                 if vix > 0 and vix < 12.5:
+                    if potential_signal:
+                        log.info(f"[OI-Flow] Trigger {potential_signal} breached but entry blocked by: Low VIX ({vix:.2f} < 12.5).")
                     return None
             except Exception as e:
                 log.warning(f"[VIX] Failed to fetch VIX in entry check: {e}")
-            
-        if self._theta_lockdown_until and ts < self._theta_lockdown_until:
-            return None
-
-        if self.daily_pnl_mtm <= -self.max_daily_loss:
-            return None
-        if self.last_exit_time and (ts - self.last_exit_time).total_seconds() < 900:
-            return None
 
         t_str = ts.strftime("%H:%M")
-        if t_str < "09:20" or t_str > "14:30":
+        if t_str < "09:15":
             return None
 
         # ── VIX-Driven Volatility Size Scaling ──
@@ -391,98 +492,124 @@ class OIFlowEngine:
         position_target = None
         sl_spot = None
 
-        # ── TRENDING: Pure Breakouts ──
-        if self.regime == "trending":
-            # 1. Breakout Confirmation (ONLY Gann levels)
-            if self.gann and self.ce_trigger > 0:
-                if self.ce_trigger <= spot < self.ce_target:
-                    self._breakout_confirmed_dir = "CE"
-                    self._breakout_price = self.ce_trigger
-                elif self.pe_target < spot <= self.pe_trigger:
-                    self._breakout_confirmed_dir = "PE"
-                    self._breakout_price = self.pe_trigger
+        # ── Daily Bias & Reversal Flip Entry Engine ──
+        # Bypass Gann if structural S/R is enabled
+        
+        # Pillar 1: Structural Price S/R Mapping
+        if self._cached_spot_levels is None or (ts - self._cached_spot_ts).total_seconds() > 300:
+            self._cached_spot_levels = self.analyzer.get_structural_spot_levels(window=20)
+            self._cached_spot_ts = ts
+            
+        supports = self._cached_spot_levels.get("support", [])
+        resistances = self._cached_spot_levels.get("resistance", [])
+        
+        active_res = None
+        active_sup = None
+        
+        # Find the nearest resistance above spot, and support below spot
+        for res in sorted(resistances):
+            if res >= spot:
+                active_res = res
+                break
+        
+        for sup in sorted(supports, reverse=True):
+            if sup <= spot:
+                active_sup = sup
+                break
+                
+        # If no structural levels found from CSV, fallback to Gann
+        if active_res is None or active_sup is None:
+            if not self.gann or not self.ce_trigger or not self.ce_sl:
+                return None
+            active_res = self.ce_trigger
+            active_sup = self.ce_sl
 
-            # 2. Pure Breakout Entry
-            if self._breakout_confirmed_dir == "CE" and self.gann:
-                if self.ce_fixed_strikes:
-                    key = f"{int(self.ce_fixed_strikes[0])}_CE"
-                    # Re-entry restriction: must break previous peak spot
-                    if self.last_trade_peak_spot > 0 and spot <= self.last_trade_peak_spot:
-                        return None
-                    if True: # Bypass premium EMA check for instant entry
+        # Dynamic ATM Strike for OI check
+        atm = round(spot / self.strike_step) * self.strike_step
+
+        if not self.flip_triggered:
+            if self.daily_bias == "CE":
+                # Looking to buy Support (Reversal)
+                if active_sup and (spot <= active_sup + 10.0 and spot >= active_sup - 10.0):
+                    # Pillar 2: Live OI Confirmation
+                    oi_status = self.analyzer.get_live_oi_change(atm, window_minutes=15)
+                    if oi_status == "REVERSAL_CONFIRMED":
+                        # Pillar 3: Premium Support Check
+                        prem_levels = self.analyzer.get_premium_historical_levels(atm - self.strike_step, "CE")
+                        prem_floor = prem_levels.get("support", 0)
+                        
                         direction = "CE"
-                        reason = f"BREAKOUT bullish above {self._breakout_price:.2f} (Gann)"
-                        position_target = self.ce_target
-                        sl_spot = self.ce_sl
-
-            elif self._breakout_confirmed_dir == "PE" and self.gann:
-                if self.pe_fixed_strikes:
-                    key = f"{int(self.pe_fixed_strikes[0])}_PE"
-                    # Re-entry restriction: must break below previous trough spot
-                    if self.last_trade_trough_spot < float('inf') and spot >= self.last_trade_trough_spot:
-                        return None
-                    if True: # Bypass premium EMA check for instant entry
+                        position_target = active_res
+                        reason = f"PILLAR ENTRY: Buy CE at {spot:.1f} (Structural Sup {active_sup:.1f}, OI Reversal)"
+                        self.max_spot_in_trade = spot
+                    elif oi_status == "BREAKOUT_WARNING":
+                        log.info(f"Spot at Support {active_sup}, but OI warns of Breakdown. Aborting CE.")
+                        
+            elif self.daily_bias == "PE":
+                # Looking to sell Resistance (Reversal)
+                if active_res and (spot >= active_res - 10.0 and spot <= active_res + 10.0):
+                    # Pillar 2: Live OI Confirmation
+                    oi_status = self.analyzer.get_live_oi_change(atm, window_minutes=15)
+                    if oi_status == "REVERSAL_CONFIRMED":
+                        # Pillar 3: Premium Support Check
+                        prem_levels = self.analyzer.get_premium_historical_levels(atm + self.strike_step, "PE")
+                        prem_floor = prem_levels.get("support", 0)
+                        
                         direction = "PE"
-                        reason = f"BREAKDOWN bearish below {self._breakout_price:.2f} (Gann)"
-                        position_target = self.pe_target
-                        sl_spot = self.pe_sl
-
-        # 🔶 SIDEWAYS: Range breakouts (ONLY Gann levels) 🔶
-        elif self.regime == "sideways":
-            if direction is None and self.gann:
-                buy_45 = self.gann.levels["buy"][45]
-                sell_45 = self.gann.levels["sell"][45]
-                if self.oi_bias == "bullish" and spot >= buy_45 and self.ema_trend == "bull":
-                    direction = "CE"
-                    reason = f"BREAKOUT bullish above {buy_45:.2f} (Gann 45°)"
-                    strength = "single"
-                    position_target = self.gann.levels["buy"][90]
-                    sl_spot = self.gann.base_price
-                elif self.oi_bias == "bearish" and spot <= sell_45 and self.ema_trend == "bear":
-                    direction = "PE"
-                    reason = f"BREAKDOWN bearish below {sell_45:.2f} (Gann 45°)"
-                    strength = "single"
-                    position_target = self.gann.levels["sell"][90]
-                    sl_spot = self.gann.base_price
-
-        # ── REVERSAL: 12:00-14:00, dual confirmation ──
-        # DISABLED PER USER REQUEST
-        if False and direction is None and "12:00" <= t_str <= "14:00" and len(self._oi_afternoon) >= 2:
-            _, pp, pc = self._oi_afternoon[-2]
-            _, cp, cc = self._oi_afternoon[-1]
-            pe_d = cp - pp
-            ce_d = cc - pc
-
-            thresh = self.signal_threshold
-            is_bull_rev = (pe_d > thresh and ce_d < -thresh)
-            is_bear_rev = (ce_d > thresh and pe_d < -thresh)
-
-            if is_bull_rev and (self._ema_macro_val == 0 or spot > self._ema_macro_val):
-                # Bullish reversal -> Buy CE (Filtered by Macro Trend)
-                if self.ce_fixed_strikes:
-                    key = f"{int(self.ce_fixed_strikes[0])}_CE"
-                    if self._prem_ema_fast.get(key, 0) > self._prem_ema_slow.get(key, 0):
-                        direction = "CE"
-                        reason = f"REV PE+{pe_d/1e6:.1f}M CE{ce_d/1e6:.1f}M"
-                        strength = "single"
-            elif is_bear_rev and (self._ema_macro_val == 0 or spot < self._ema_macro_val):
-                # Bearish reversal -> Buy PE (Filtered by Macro Trend)
-                if self.pe_fixed_strikes:
-                    key = f"{int(self.pe_fixed_strikes[0])}_PE"
-                    if self._prem_ema_fast.get(key, 0) > self._prem_ema_slow.get(key, 0):
-                        direction = "PE"
-                        reason = f"REV CE+{ce_d/1e6:.1f}M PE{pe_d/1e6:.1f}M"
-                        strength = "single"
-
-
+                        position_target = active_sup
+                        reason = f"PILLAR ENTRY: Buy PE at {spot:.1f} (Structural Res {active_res:.1f}, OI Reversal)"
+                        self.min_spot_in_trade = spot
+                    elif oi_status == "BREAKOUT_WARNING":
+                        log.info(f"Spot at Resistance {active_res}, but OI warns of Breakout. Aborting PE.")
+        else:
+            if self.daily_bias == "CE":
+                direction = "CE"
+                position_target = active_res
+                reason = f"FLIP ENTRY: Buy CE at {spot:.1f} (Tgt {active_res:.1f})"
+                self.max_spot_in_trade = spot
+                self.flip_triggered = False
+            elif self.daily_bias == "PE":
+                direction = "PE"
+                position_target = active_sup
+                reason = f"FLIP ENTRY: Buy PE at {spot:.1f} (Tgt {active_sup:.1f})"
+                self.min_spot_in_trade = spot
+                self.flip_triggered = False
 
         if direction is None:
             return None
+        # ENFORCE NIFTY MASTER FILTER
+        if nifty_bias == "BEARISH" and direction == "CE":
+            log.info(f"[OI-Flow] CE Entry blocked because Nifty Master OI is BEARISH.")
+            return None
+        if nifty_bias == "BULLISH" and direction == "PE":
+            log.info(f"[OI-Flow] PE Entry blocked because Nifty Master OI is BULLISH.")
+            return None
 
-        # Pick strikes
-        strikes = list(self.ce_fixed_strikes if direction == "CE"
-                       else self.pe_fixed_strikes)
 
+        # Dynamic ATM/ITM Strike Selection at the moment of entry
+        # This prevents trading illiquid, deep-ITM option strikes when the market moves heavily.
+        atm = round(spot / self.strike_step) * self.strike_step
+        step = self.strike_step
+        if direction == "CE":
+            # Buy ITM Calls (Strikes <= Spot)
+            strikes = [atm - 2 * step, atm - step, atm]
+        else:
+            # Buy ITM Puts (Strikes >= Spot)
+            strikes = [atm + 2 * step, atm + step, atm]
+
+        # Pillar 4 Setup: Map the Premium target and True Premium Floor
+        premium_target_price = 0.0
+        premium_floor_sl = 0.0
+        if direction == "CE" and active_res:
+            premium_target_price = self.analyzer.get_premium_at_spot_level(strikes[0], "CE", active_res)
+            # Find the true historical support floor for this premium
+            prem_levels = self.analyzer.get_premium_historical_levels(strikes[0], "CE")
+            premium_floor_sl = prem_levels.get("support", 0.0)
+        elif direction == "PE" and active_sup:
+            premium_target_price = self.analyzer.get_premium_at_spot_level(strikes[0], "PE", active_sup)
+            prem_levels = self.analyzer.get_premium_historical_levels(strikes[0], "PE")
+            premium_floor_sl = prem_levels.get("support", 0.0)
+            
         return {
             "action": "entry",
             "direction": direction,
@@ -491,6 +618,8 @@ class OIFlowEngine:
             "signal_strength": strength,
             "reason": reason,
             "target": position_target,
+            "premium_target_price": premium_target_price,
+            "premium_floor_sl": premium_floor_sl,
             "sl_spot": sl_spot,
             "timestamp": ts.isoformat(),
             "size_multiplier": size_multiplier,
@@ -514,46 +643,123 @@ class OIFlowEngine:
         trade_num = self.position.get("trade_num", 1)
         hold_mins = (ts - entry_time).total_seconds() / 60
 
-        # 1. Trailing SL & Runner Break-Even
+        # 1. Premium Structural Support Stop-Loss (The True Floor)
+        # Instead of arbitrary spot distance, exit if the premium breaks its structural floor
+        premium_floor = self.position.get("premium_floor_sl", 0)
+        if premium_floor > 0 and premiums:
+            # We track the ATM strike's premium value
+            atm_strike = strikes[0]
+            current_atm_prem = premiums.get(f"{int(atm_strike)}_{direction}", 0)
+            if current_atm_prem > 0 and current_atm_prem < premium_floor:
+                self.reversal_exit_spot = spot
+                return {"action": "exit", "reason": f"PREMIUM S/R EXIT: {direction} Premium broke structural floor ({premium_floor:.1f})"}
+                
+        # 1.5 Back-up Spot Reversal Stop (Widened from 15 to 25 to allow Premium S/R to breathe)
+        structural_rev = 75.0 if self.strike_step == 100 else 25.0
+        if direction == "CE" and spot <= self.max_spot_in_trade - structural_rev:
+            self.reversal_exit_spot = spot
+            return {"action": "exit", "reason": f"25-PT REVERSAL EXIT: Spot dropped 25pts from peak ({self.max_spot_in_trade:.1f} -> {spot:.1f})"}
+        elif direction == "PE" and spot >= self.min_spot_in_trade + structural_rev:
+            self.reversal_exit_spot = spot
+            return {"action": "exit", "reason": f"25-PT REVERSAL EXIT: Spot rose 25pts from trough ({self.min_spot_in_trade:.1f} -> {spot:.1f})"}
+
+        # ── Pillar 2 & Pillar 4: Structural Target and Live OI Exit ──
+        if self._cached_spot_levels:
+            supports = self._cached_spot_levels.get("support", [])
+            resistances = self._cached_spot_levels.get("resistance", [])
+            atm = round(spot / self.strike_step) * self.strike_step
+            
+            # Check if we are approaching a structural target
+            if direction == "CE":
+                for res in sorted(resistances):
+                    if spot >= res - 5.0 and spot <= res + 5.0:
+                        # Pillar 2: Live OI Check at Target
+                        oi_status = self.analyzer.get_live_oi_change(atm, window_minutes=15)
+                        if oi_status == "REVERSAL_CONFIRMED":
+                            # Resistance is holding. EXIT immediately.
+                            return {"action": "exit", "reason": f"PILLAR EXIT: CE Hit Structural Res {res:.1f} and Live OI confirms Reversal (Ceiling)."}
+                        elif oi_status == "BREAKOUT_WARNING":
+                            # Breakout imminent. Widen trailing SL to survive shakeout.
+                            self.trailing_sl_pct = 0.35 # Widen to 35%
+                            log.info(f"CE at Resistance {res:.1f} but Breakout Imminent. Widening TSL to survive shakeout.")
+                        break
+            elif direction == "PE":
+                for sup in sorted(supports, reverse=True):
+                    if spot <= sup + 5.0 and spot >= sup - 5.0:
+                        # Pillar 2: Live OI Check at Target
+                        oi_status = self.analyzer.get_live_oi_change(atm, window_minutes=15)
+                        if oi_status == "BREAKOUT_WARNING": # Support holding (PE writers)
+                            return {"action": "exit", "reason": f"PILLAR EXIT: PE Hit Structural Sup {sup:.1f} and Live OI confirms Support."}
+                        elif oi_status == "REVERSAL_CONFIRMED":
+                            # Breakdown imminent. Widen TSL.
+                            self.trailing_sl_pct = 0.35
+                            log.info(f"PE at Support {sup:.1f} but Breakdown Imminent. Widening TSL to survive shakeout.")
+                        break
+
+        # ── Pillar 4: Premium Take-Profit Target ──
+        target_prem = self.position.get("premium_target_price")
+        if target_prem and premiums:
+            current_avg = sum(premiums.get(f"{int(s)}_{direction}", 0) for s in strikes) / max(len(strikes), 1)
+            if current_avg >= target_prem:
+                # Target Hit! Tighten TSL to lock it in instead of exiting instantly
+                self.trailing_sl_pct = 0.05
+                log.info(f"PILLAR 4: Premium hit target {target_prem:.1f}! Tightening TSL to 5% to ride the breakout.")
+                # We do not return exit immediately, we let the tight 5% TSL catch the peak.
+
+        # 2. Premium Protections (Breakeven & TSL)
         if entry_avg > 0 and premiums:
             current_avg = sum(premiums.get(f"{int(s)}_{direction}", 0) for s in strikes) / max(len(strikes), 1)
             if current_avg > max_avg:
                 self.position["max_avg_premium"] = current_avg
                 max_avg = current_avg
             
-            # Structural Stop Loss (Dynamic 21 EMA)
-            if self.use_structural_sl:
-                # Use dynamic 21 EMA as default trailing structural SL if sl_spot not hardcoded
-                curr_sl = self.position.get("sl_spot") or self._ema_slow_val
-                if direction == "CE" and spot <= curr_sl:
-                    return {"action": "exit", "reason": f"STRUCTURAL SL: Spot broke {curr_sl:.0f}"}
-                elif direction == "PE" and spot >= curr_sl:
-                    return {"action": "exit", "reason": f"STRUCTURAL SL: Spot broke {curr_sl:.0f}"}
+            # Option Premium Breakeven Stop Loss (Once premium rises by +15%, lock SL to entry)
+            is_breakeven = self.position.get("breakeven_activated", False)
+            if not is_breakeven and current_avg >= entry_avg * 1.15:
+                self.position["breakeven_activated"] = True
+                log.info(f"[OI-Flow] Premium +15% profit reached. Breakeven SL activated.")
+            # OPTION 3: Take-Profit Scaling Simulation
+            # Once spot moves 10pts (Nifty) or 30pts (Sensex) in our favor, lock SL to a small profit.
+            # This mathematically simulates scaling out 6 lots while letting 5 run, without breaking core order logic.
+            is_scaled = self.position.get("tp_scaled", False)
+            tp_target = 30.0 if self.strike_step == 100 else 10.0
+            entry_spot = self.position.get("entry_spot", spot)
             
-            # Runner Break-Even Stop Loss
+            if not is_scaled:
+                if (direction == "CE" and spot >= entry_spot + tp_target) or \
+                   (direction == "PE" and spot <= entry_spot - tp_target):
+                    self.position["tp_scaled"] = True
+                    self.position["breakeven_activated"] = True
+                    # Set minimum exit premium to lock in cash equivalent of 6 lots taking profit
+                    self.position["locked_exit_premium"] = entry_avg * 1.05
+                    log.info(f"[OI-Flow] Take-Profit Scaling Target Reached! Locking SL to +5% to simulate partial exit.")
+            
+            if self.position.get("tp_scaled", False):
+                min_exit = self.position.get("locked_exit_premium", entry_avg)
+                if current_avg <= min_exit:
+                    self.reversal_exit_spot = spot
+                    return {"action": "exit", "reason": "TP SCALING STOP: Locked in profit after hitting Target."}
+
+            if self.position.get("breakeven_activated", False):
+                if current_avg <= entry_avg:
+                    self.reversal_exit_spot = spot # Treat BE exit as reversal trigger to allow flip
+                    return {"action": "exit", "reason": "Premium Breakeven SL hit"}
+
+            # Runner Break-Even Stop Loss (after scale out)
             if self.position.get("tier1_done"):
-                # If we've scaled out, the runner stop is Entry + 5 points
                 if current_avg <= entry_avg + 5:
-                    return {"action": "exit",
-                            "reason": "RUNNER: Stopped at Break-Even"}
+                    self.reversal_exit_spot = spot # Treat runner BE exit as reversal trigger to allow flip
+                    return {"action": "exit", "reason": "RUNNER: Stopped at Break-Even"}
                             
             # Options Buyer Premium TSL (ALWAYS ON)
             if current_avg > 0 and (current_avg - max_avg) / max_avg <= -self.trailing_sl_pct:
-                return {"action": "exit",
-                        "reason": f"TSL: -{self.trailing_sl_pct*100:.0f}% from peak"}
+                self.reversal_exit_spot = spot # Treat TSL hit as reversal trigger to allow flip
+                return {"action": "exit", "reason": f"TSL: -{self.trailing_sl_pct*100:.0f}% from peak"}
 
-        # 1.5 Target Hit (Scale Out)
-        target = self.position.get("target")
-        if target and not self.position.get("tier1_done"):
-            if (direction == "CE" and spot >= target) or (direction == "PE" and spot <= target):
-                self.position["tier1_done"] = True
-                return {"action": "partial_exit",
-                        "reason": f"S&R Target Reached {target}"}
+        # 3. Target Hit (Full Exit) - DISABLED per user request to ride the 12 EMA trend
 
-        # 2. Max hold
-        if hold_mins >= self.max_hold_minutes:
-            return {"action": "exit",
-                    "reason": f"MAX HOLD: {self.max_hold_minutes}min"}
+        # 2. Max hold check disabled per user request to allow holding trade until SL/TSL is hit.
+        pass
 
         return None
 
@@ -648,8 +854,11 @@ class OIFlowEngine:
             "trade_num": trade_num,
             "signal_strength": signal.get("signal_strength", "single"),
             "target": signal.get("target"),
+            "premium_target_price": signal.get("premium_target_price", 0.0),
+            "premium_floor_sl": signal.get("premium_floor_sl", 0.0),
             "sl_spot": signal.get("sl_spot"),
             "tier1_done": False,
+            "entry_spot": signal.get("spot", spot if 'spot' in locals() else 24000.0),
             "lots_per_strike": lots or {s: 1 for s in strikes}
         }
         self.direction = direction
@@ -660,6 +869,12 @@ class OIFlowEngine:
 
         log.info(f"[OI-Flow] OPEN {direction} | Trade #{trade_num} | "
                  f"Strikes={strikes} | Premiums={premiums}")
+
+        # Mode 2: Directional Hedging — short the opposing leg simultaneously
+        spot_val = signal.get("spot", 24000.0)
+        self.seller_bot.open_directional_hedge(
+            direction, strikes, spot_val, ts, premiums, self.analyzer
+        )
 
     def close_position(self, reason: str, exit_premiums: dict,
                        ts: datetime) -> Optional[dict]:
@@ -674,6 +889,15 @@ class OIFlowEngine:
         for strike, exit_ltp in exit_premiums.items():
             entry_ltp = entry_prems.get(strike, exit_ltp)
             lots_count = self.position.get("lots_per_strike", {}).get(strike, 1)
+            
+            # Fallback to intrinsic value if backtest data is missing (exit_ltp is 0)
+            spot = exit_premiums.get("spot", self.position.get("entry_spot", 24000.0))
+            if not exit_ltp or exit_ltp <= 0:
+                if direction == "CE":
+                    exit_ltp = max(0.5, spot - strike)
+                else:
+                    exit_ltp = max(0.5, strike - spot)
+                    
             pnl = (exit_ltp - entry_ltp) * lots_count * self.lot_size
             pnl_per_strike[strike] = pnl
             total_pnl += pnl
@@ -692,6 +916,8 @@ class OIFlowEngine:
             self.last_trade_trough_spot = self.position.get("trough_spot", float('inf'))
 
         self.last_exit_time = ts
+        from datetime import timedelta
+        self._theta_lockdown_until = ts + timedelta(minutes=15)
 
         result = {
             "direction": direction,
@@ -703,6 +929,14 @@ class OIFlowEngine:
 
         log.info(f"[OI-Flow] CLOSE {direction} | {reason} | "
                  f"P&L={total_pnl:+.0f}")
+
+        # Close the Seller Bot's directional hedge along with the buyer's position
+        if self.seller_bot.hedge_position is not None:
+            hedge_result = self.seller_bot.close_hedge_position(
+                exit_premiums, ts, "Buyer closed directional trade"
+            )
+            result["hedge_pnl"] = hedge_result.get("total_pnl", 0.0)
+            result["total_pnl"] = total_pnl + result["hedge_pnl"]
 
         self.position = None
         self.direction = None
@@ -764,30 +998,13 @@ class OIFlowEngine:
         if len(strikes) != 3:
             return {s: 1 for s in strikes}
 
-        capital = float(OPTS.get("oi_flow_capital_per_trade", 30000)) * size_mult
+        # User specifically requested NO capital limits. 
+        # We buy exactly 6 lots, 3 lots, and 2 lots.
         ratio = [6, 3, 2]
         allocation = {}
-        remaining = capital
-
         for i, strike in enumerate(strikes):
-            target = capital * ratio[i] / sum(ratio)
-            cost_per_lot = premiums[strike] * self.lot_size
-            if cost_per_lot <= 0:
-                allocation[strike] = 1
-                continue
-            max_lots = max(1, int(target / cost_per_lot))
-            actual = min(max_lots, int(remaining / cost_per_lot))
-            actual = max(1, actual)
-            allocation[strike] = actual
-            remaining -= actual * cost_per_lot
-
-        if remaining > 0 and strikes:
-            cost_per_lot = premiums[strikes[0]] * self.lot_size
-            if cost_per_lot > 0:
-                extra = int(remaining / cost_per_lot)
-                if extra > 0:
-                    allocation[strikes[0]] += extra
-
+            allocation[strike] = max(1, int(ratio[i] * size_mult))
+            
         return allocation
 
     # ═══════════════════════════════════════════════════════════════
@@ -796,6 +1013,7 @@ class OIFlowEngine:
 
     def _update_ema(self, spot: float, ts: datetime):
         ts_min = ts.replace(second=0, microsecond=0)
+        
         if self._last_ema_ts and ts_min <= self._last_ema_ts:
             return
         self._last_ema_ts = ts_min
