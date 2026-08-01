@@ -22,11 +22,14 @@ export interface Trade {
   entry_time: string;
   exit_time: string;
   trade_type: string;
-  strike: number;
-  entry_price: number;
-  exit_price: number;
+  strike?: number;
+  entry_price?: number;
+  exit_price?: number;
   pnl: number;
   reason: string;
+  strikes?: number[];
+  entry_premiums?: Record<string, number>;
+  exit_premiums?: Record<string, number>;
 }
 
 export interface PortfolioStats {
@@ -149,4 +152,4 @@ export interface StreamTick {
   message?: string;
 }
 
-export type BotName = 'NIFTY' | 'SENSEX' | 'NIFTY_REGIME' | 'SENSEX_REGIME' | 'NIFTY_T1' | 'NIFTY_T2' | 'NIFTY_SELLER';
+export type BotName = 'NIFTY' | 'SENSEX' | 'NIFTY_SELLER';

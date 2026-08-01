@@ -20,7 +20,7 @@ from pathlib import Path
 
 from upstox_auth import UpstoxAuth
 from signal_engine import (
-    SignalEngine, calc_ema, calc_atr,
+    PriceActionBot, calc_ema, calc_atr,
     classify_dte_risk, calculate_position_size, 
     SL_PCT, TARGET_PCT
 )
@@ -131,7 +131,7 @@ def run_backtest():
     options_dict = load_options_data()
     merged_df, spot_5m, spot_15m = build_indicators(spot_df)
 
-    engine = SignalEngine()
+    engine = PriceActionBot()
     trades = []
     capital = INITIAL_CAPITAL
     in_position = False

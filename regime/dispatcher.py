@@ -93,17 +93,29 @@ def _legacy_signal_from_tactic(
 
 
 class TacticDispatcher:
-    def __init__(self, mode: str = "regime", *, strike_step: int = _DEFAULT_STRIKE_STEP):
+    def __init__(
+        self,
+        mode: str = "regime",
+        *,
+        strike_step: int = _DEFAULT_STRIKE_STEP,
+        premium_analyzer: Optional[object] = None,
+    ):
         self.mode = mode
         self.strike_step = strike_step
         self.classifier = RegimeClassifier(ClassifierConfig(sustain_min=15))
         self.router = StrategyRouter()
         self.indicators = IndicatorTracker()
+        from tactics.seller_tactics import ShortStraddleTactic, ShortStrangleTactic
+        from regime.seller_engine import OptionSellerEngine
+        self.seller_engine = OptionSellerEngine(premium_analyzer=premium_analyzer)
         self.tactics: dict[Tactic, object] = {
             Tactic.OI_TREND_PULLBACK: TrendPullbackTactic(),
             Tactic.BULLISH_LAUNCHPAD: BullishORBTactic(),
             Tactic.BEARISH_LAUNCHPAD: BearishORBTactic(),
+            Tactic.SHORT_STRADDLE: ShortStraddleTactic(),
+            Tactic.SHORT_STRANGLE: ShortStrangleTactic(),
         }
+        self.directional_hedging_enabled: bool = True
         # IEF is a "bonus" tactic that fires alongside the trend tactic when
         # the SMC pattern aligns. It's queried in addition to the routed
         # tactic on TREND_UP / TREND_DOWN regimes.
@@ -165,8 +177,11 @@ class TacticDispatcher:
 
     # ----- per-tick state ingest ----------------------------------------
 
-    def on_spot_tick(self, ts: datetime, spot: float) -> None:
+    def on_spot_tick(self, ts: datetime, spot: float, ce_prem: float = 0.0, pe_prem: float = 0.0) -> None:
         self.indicators.on_spot_tick(ts, spot)
+        if hasattr(self, "seller_engine") and self.seller_engine:
+            self.seller_engine.update_ticks(ts, spot, ce_prem=ce_prem, pe_prem=pe_prem)
+
     def update_and_get_regime(self, ts: datetime, fetcher) -> str:
         """Forces an indicator update and regime classification without running tactic routing.
         Used by standalone bots (like Seller) that need the regime but don't want buyer signals.
@@ -202,7 +217,18 @@ class TacticDispatcher:
             prev_day_close=snap["prev_day_close"],
         )
         regime = self.classifier.classify(feat)
+        if hasattr(self, "seller_engine") and self.seller_engine:
+            self.seller_engine.update_ticks(ts, spot, ce_prem=0.0, pe_prem=0.0)
+            self.seller_engine.set_regime(regime, ts=ts)
         return regime.value
+
+    @property
+    def buyer_locked(self) -> bool:
+        """True when market is in VOLATILITY_CRUSH or CHOP regime, or seller_engine buyer_locked is active."""
+        curr = self.classifier.current
+        return curr in (Regime.VOLATILITY_CRUSH, Regime.CHOP) or bool(
+            hasattr(self, "seller_engine") and self.seller_engine and self.seller_engine.buyer_locked
+        )
 
     # ----- evaluate -----------------------------------------------------
 
@@ -216,6 +242,8 @@ class TacticDispatcher:
         position_direction: Optional[str] = None,
         position_entry_premium: float = 0.0,
         position_lots_added: int = 0,
+        straddle_decay_15m: float = 0.0,
+        spot_range_pts: float = 0.0,
     ) -> dict:
         """Returns a legacy-format signal dict (so main.py needs minimal changes)."""
 
@@ -384,11 +412,15 @@ class TacticDispatcher:
             or_low=snap["or_low"],
             vix_level=vix,
             vix_chg_15m=0.0,
+            straddle_decay_15m=straddle_decay_15m,
+            spot_range_pts=spot_range_pts,
             dte=dte,
             event_flag=False,
             prev_day_close=snap["prev_day_close"],
         )
         regime = self.classifier.classify(feat)
+        if hasattr(self, "seller_engine") and self.seller_engine:
+            self.seller_engine.set_regime(regime, ts=ts)
 
         # ---- Route ----
         decision = self.router.route(regime, open_direction=position_direction)
@@ -490,6 +522,22 @@ class TacticDispatcher:
         legacy = _legacy_signal_from_tactic(sig, regime, dte, is_expiry)
         legacy["tactic_name"] = decision.tactic.value
         legacy["near_misses"] = []
+
+        # Directional Hedging Mode support: attach counter short leg for buyer signals
+        if (
+            self.directional_hedging_enabled
+            and legacy.get("direction") in ("CE", "PE")
+            and not legacy.get("is_straddle")
+            and decision.tactic not in (Tactic.SHORT_STRADDLE, Tactic.SHORT_STRANGLE)
+        ):
+            counter_dir = "PE" if legacy["direction"] == "CE" else "CE"
+            legacy["is_hedged"] = True
+            legacy["counter_short_leg"] = {
+                "direction": counter_dir,
+                "transaction_type": "SELL",
+                "strike_offset": 0,
+            }
+
         return legacy
 
     # ----- helpers ------------------------------------------------------

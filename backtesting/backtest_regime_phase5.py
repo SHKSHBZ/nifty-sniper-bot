@@ -35,7 +35,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from regime.classifier import RegimeClassifier, ClassifierConfig, Regime  # noqa: E402
-from signal_engine import SignalEngine  # noqa: E402
+from signal_engine import PriceActionBot  # noqa: E402
 from backtesting.backtest_regime_phase1 import (  # noqa: E402
     load_spot, load_vix, resample, previous_day_close, build_feature_for_bar,
 )
@@ -108,7 +108,7 @@ def simulate_and_capture(
     regime_gated: bool,
 ) -> list[TradeRecord]:
     classifier = RegimeClassifier(ClassifierConfig(sustain_min=15))
-    engine = SignalEngine()
+    engine = PriceActionBot()
     records: list[TradeRecord] = []
 
     trading_days = sorted({d for d in spot_1m.index.date})

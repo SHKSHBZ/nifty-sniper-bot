@@ -1,12 +1,15 @@
 """
 tests/test_sniper_entry.py
 ==========================
-Comprehensive test suite for the Sniper Entry Logic v3.0
+Comprehensive test suite for PriceActionBot v4.0 — SMC Price Action + 3TF Hybrid HTF.
 
-Tests the three-gate entry system:
-  Gate 1: Spot Sustain Check
-  Gate 2: Focus Zone PCR
-  Gate 3: OI Build-Up Confirmation
+Tests:
+  - Swing detection (5-candle method)
+  - BOS (Break of Structure) detection
+  - CHoCH+ (Change of Character) detection
+  - Rejection candle confirmation
+  - 3TF HTF state scoring
+  - Daily loss guard & cooldown
 """
 
 import unittest
@@ -18,8 +21,7 @@ from datetime import datetime, timedelta
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from signal_engine import (
-    SignalEngine, check_sustain, interpret_focus_pcr,
-    check_oi_confirmation, classify_dte_risk
+    PriceActionBot, classify_dte_risk, calculate_position_size,
 )
 
 
@@ -49,344 +51,183 @@ def build_spot_history_varied(prices, interval_seconds=60):
 
 
 # ==========================================================================
-# Gate 1: Spot Sustain Engine Tests
+# PriceActionBot Tests — Swing Detection & BOS/CHoCH+
 # ==========================================================================
 
-class TestSustainCheck(unittest.TestCase):
-    """Gate 1: Verify price sustain logic at support/resistance levels."""
+class TestSwingDetection(unittest.TestCase):
+    """5-candle swing high/low detection."""
 
-    def test_sustain_confirmed_at_support(self):
-        """Price stays within 0.15% of support for 3 consecutive 5m candles → PASS."""
-        support = 22400
-        # 15 readings all at 22410 (within 0.15% of 22400)
-        history = build_spot_history(22410, count=15)
-        self.assertTrue(check_sustain(history, support))
+    def _make_candles(self, highs, lows, closes=None):
+        """Build candle list from parallel arrays of high/low/close."""
+        now = datetime.now()
+        if closes is None:
+            closes = [(h + l) / 2 for h, l in zip(highs, lows)]
+        candles = []
+        for i, (h, l) in enumerate(zip(highs, lows)):
+            c = closes[i]
+            o = c - 2 if i % 2 == 0 else c + 2
+            candles.append({
+                "ts": now + timedelta(minutes=i * 5),
+                "o": o, "h": h, "l": l, "c": c,
+            })
+        return candles
 
-    def test_sustain_confirmed_at_resistance(self):
-        """Price stays within 0.15% of resistance for 3 consecutive 5m candles → PASS."""
-        resistance = 22700
-        history = build_spot_history(22695, count=15)
-        self.assertTrue(check_sustain(history, resistance))
+    def test_clear_swing_high(self):
+        """A clear peak in the middle → detected as swing high."""
+        highs = [100, 102, 101, 105, 103, 102, 101]  # peak at index 3
+        lows = [98, 99, 99, 103, 100, 99, 98]
+        candles = self._make_candles(highs, lows)
+        sh, sl = PriceActionBot._detect_swings(candles, lookback=2)
+        self.assertEqual(len(sh), 1)
+        self.assertEqual(sh[0][0], 3)  # index 3
+        self.assertAlmostEqual(sh[0][1], 105.0)
 
-    def test_sustain_fails_insufficient_data(self):
-        """Not enough history (only 5 readings, need 11) → FAIL."""
-        support = 22400
-        history = build_spot_history(22410, count=5)
-        self.assertFalse(check_sustain(history, support))
+    def test_clear_swing_low(self):
+        """A clear trough → detected as swing low."""
+        highs = [100, 101, 102, 100, 103, 104, 105]
+        lows = [98, 97, 96, 92, 95, 97, 99]  # trough at index 3
+        candles = self._make_candles(highs, lows)
+        sh, sl = PriceActionBot._detect_swings(candles, lookback=2)
+        self.assertEqual(len(sl), 1)
+        self.assertEqual(sl[0][0], 3)
+        self.assertAlmostEqual(sl[0][1], 92.0)
 
-    def test_sustain_fails_price_left_zone(self):
-        """Price was far away 10 minutes ago, only recently arrived → FAIL."""
-        support = 22400
-        # idx -1 = 22410 ✓, idx -6 = 22410 ✓, idx -11 = 22500 ✗ (0.44% away)
-        prices = [22500] * 5 + [22410] * 10
-        history = build_spot_history_varied(prices)
-        self.assertFalse(check_sustain(history, support))
+    def test_no_swing_in_trend(self):
+        """Strictly monotonic trend → no swings detected."""
+        highs = [100, 102, 104, 106, 108, 110, 112]
+        lows = [98, 100, 102, 104, 106, 108, 110]
+        candles = self._make_candles(highs, lows)
+        sh, sl = PriceActionBot._detect_swings(candles, lookback=2)
+        self.assertEqual(len(sh), 0)
+        self.assertEqual(len(sl), 0)
 
-    def test_sustain_passes_at_edge_of_proximity(self):
-        """Price exactly at the proximity boundary → PASS."""
-        support = 22400
-        # 0.15% of ~22433 ≈ 33.6 points → 22433 is 33 away from 22400
-        edge_price = 22433  # dist = 33/22433 = 0.00147 ≈ 0.147% < 0.15%
-        history = build_spot_history(edge_price, count=15)
-        self.assertTrue(check_sustain(history, support))
-
-    def test_sustain_fails_beyond_proximity(self):
-        """Price slightly beyond the 0.15% boundary → FAIL."""
-        support = 22400
-        far_price = 22440  # dist = 40/22440 = 0.00178 = 0.178% > 0.15%
-        history = build_spot_history(far_price, count=15)
-        self.assertFalse(check_sustain(history, support))
-
-    def test_sustain_with_empty_history(self):
-        """Empty spot history → FAIL gracefully."""
-        self.assertFalse(check_sustain([], 22400))
-
-    def test_sustain_gap_in_middle(self):
-        """Price was in zone, left briefly at 5m ago, back now → FAIL."""
-        support = 22400
-        # 15 readings: in zone, then out at index -6, then back
-        prices = [22410] * 4 + [22500] + [22410] * 5 + [22500] + [22410] * 4
-        history = build_spot_history_varied(prices)
-        # idx -1 = 22410 ✓, idx -6 = 22410 ✓, idx -11 = 22500 ✗
-        # Actually let me be precise: idx -1=prices[14]=22410, idx -6=prices[9]=22410, idx -11=prices[4]=22500
-        self.assertFalse(check_sustain(history, support))
+    def test_insufficient_candles(self):
+        """Fewer than 2*lookback+1 candles → no swings."""
+        highs = [100, 102, 101, 103]
+        lows = [98, 99, 98, 100]
+        candles = self._make_candles(highs, lows)
+        sh, sl = PriceActionBot._detect_swings(candles, lookback=2)
+        self.assertEqual(len(sh), 0)
+        self.assertEqual(len(sl), 0)
 
 
-# ==========================================================================
-# Gate 2: Focus Zone PCR Tests
-# ==========================================================================
+class TestBOSDetection(unittest.TestCase):
+    """Break of Structure detection."""
 
-class TestFocusPCR(unittest.TestCase):
-    """Gate 2: Focus Zone PCR interpretation tests."""
+    def _make_candles(self, closes):
+        """Make candles that form swing highs/lows for BOS testing."""
+        now = datetime.now()
+        candles = []
+        for i, c in enumerate(closes):
+            candles.append({
+                "ts": now + timedelta(minutes=i * 5),
+                "o": c - 2, "h": c + 3, "l": c - 3, "c": c,
+            })
+        return candles
 
-    def test_bullish_pcr_high(self):
-        """PCR = 1.3 → Heavy Put OI → Bullish."""
-        self.assertEqual(interpret_focus_pcr(1.3), "bullish")
+    def test_bullish_bos(self):
+        """Price breaks above previous swing high → bullish BOS."""
+        closes = [100, 98, 96, 99, 97, 95, 100, 98, 102, 101, 104, 106]
+        candles = self._make_candles(closes)
+        sh, sl = PriceActionBot._detect_swings(candles, lookback=2)
+        event, level, idx = PriceActionBot._detect_bos(candles, sh, sl)
+        self.assertEqual(event, "bullish_bos")
 
-    def test_bullish_pcr_threshold(self):
-        """PCR = 1.1 → At threshold → Bullish."""
-        self.assertEqual(interpret_focus_pcr(1.1), "bullish")
+    def test_bearish_bos(self):
+        """Price breaks below previous swing low → bearish BOS."""
+        closes = [100, 102, 104, 101, 103, 105, 100, 102, 98, 99, 96, 94]
+        candles = self._make_candles(closes)
+        sh, sl = PriceActionBot._detect_swings(candles, lookback=2)
+        event, level, idx = PriceActionBot._detect_bos(candles, sh, sl)
+        self.assertEqual(event, "bearish_bos")
 
-    def test_bearish_pcr_low(self):
-        """PCR = 0.6 → Heavy Call OI → Bearish."""
-        self.assertEqual(interpret_focus_pcr(0.6), "bearish")
-
-    def test_bearish_pcr_threshold(self):
-        """PCR = 0.85 → At threshold → Bearish."""
-        self.assertEqual(interpret_focus_pcr(0.85), "bearish")
-
-    def test_neutral_pcr(self):
-        """PCR = 0.95 → Balanced → Neutral."""
-        self.assertEqual(interpret_focus_pcr(0.95), "neutral")
-
-    def test_neutral_pcr_center(self):
-        """PCR = 1.0 → Perfectly balanced → Neutral."""
-        self.assertEqual(interpret_focus_pcr(1.0), "neutral")
-
-    def test_neutral_upper_edge(self):
-        """PCR = 1.09 → Just below bullish threshold → Neutral."""
-        self.assertEqual(interpret_focus_pcr(1.09), "neutral")
-
-    def test_neutral_lower_edge(self):
-        """PCR = 0.86 → Just above bearish threshold → Neutral."""
-        self.assertEqual(interpret_focus_pcr(0.86), "neutral")
-
-
-# ==========================================================================
-# Gate 3: OI Build-Up Confirmation Tests
-# ==========================================================================
-
-class TestOIConfirmation(unittest.TestCase):
-    """Gate 3: OI Build-Up vs Unwinding detection tests."""
-
-    def test_ce_confirmed_pe_buildup(self):
-        """For CE entry: Put OI increasing → writers defending support → PASS."""
-        oi = {'ce_oi_change': 10000, 'pe_oi_change': 50000}
-        confirmed, reason = check_oi_confirmation(oi, "CE")
-        self.assertTrue(confirmed)
-        self.assertIn("Build-Up", reason)
-
-    def test_ce_rejected_pe_unwinding(self):
-        """For CE entry: Put OI decreasing → support weakening → FAIL."""
-        oi = {'ce_oi_change': 5000, 'pe_oi_change': -30000}
-        confirmed, reason = check_oi_confirmation(oi, "CE")
-        self.assertFalse(confirmed)
-        self.assertIn("Unwinding", reason)
-
-    def test_pe_confirmed_ce_buildup(self):
-        """For PE entry: Call OI increasing → writers defending resistance → PASS."""
-        oi = {'ce_oi_change': 60000, 'pe_oi_change': -5000}
-        confirmed, reason = check_oi_confirmation(oi, "PE")
-        self.assertTrue(confirmed)
-        self.assertIn("Build-Up", reason)
-
-    def test_pe_rejected_ce_unwinding(self):
-        """For PE entry: Call OI decreasing → resistance weakening → FAIL."""
-        oi = {'ce_oi_change': -40000, 'pe_oi_change': 10000}
-        confirmed, reason = check_oi_confirmation(oi, "PE")
-        self.assertFalse(confirmed)
-        self.assertIn("Unwinding", reason)
-
-    def test_zero_oi_change_rejected(self):
-        """Zero OI change = no conviction → FAIL for both directions."""
-        oi = {'ce_oi_change': 0, 'pe_oi_change': 0}
-        confirmed_ce, _ = check_oi_confirmation(oi, "CE")
-        confirmed_pe, _ = check_oi_confirmation(oi, "PE")
-        self.assertFalse(confirmed_ce)
-        self.assertFalse(confirmed_pe)
-
-    def test_ce_only_cares_about_pe_oi(self):
-        """CE entry should pass even if CE OI is unwinding, as long as PE OI builds up."""
-        oi = {'ce_oi_change': -50000, 'pe_oi_change': 30000}
-        confirmed, _ = check_oi_confirmation(oi, "CE")
-        self.assertTrue(confirmed)
-
-    def test_pe_only_cares_about_ce_oi(self):
-        """PE entry should pass even if PE OI is unwinding, as long as CE OI builds up."""
-        oi = {'ce_oi_change': 40000, 'pe_oi_change': -20000}
-        confirmed, _ = check_oi_confirmation(oi, "PE")
-        self.assertTrue(confirmed)
+    def test_no_bos_without_swing_break(self):
+        """No swing broken → no BOS."""
+        closes = [100, 101, 100, 101, 100, 101, 100, 101, 100]
+        candles = self._make_candles(closes)
+        sh, sl = PriceActionBot._detect_swings(candles, lookback=2)
+        event, level, idx = PriceActionBot._detect_bos(candles, sh, sl)
+        self.assertIsNone(event)
 
 
-# ==========================================================================
-# Full Signal Evaluation (End-to-End Integration Tests)
-# ==========================================================================
+class TestRejectionCandle(unittest.TestCase):
+    """Rejection candle confirmation."""
 
-class TestFullSignalEvaluation(unittest.TestCase):
-    """End-to-end signal evaluation testing all three gates together."""
+    def test_bullish_rejection(self):
+        """Close in upper half → bullish rejection."""
+        candle = {"o": 100, "h": 110, "l": 90, "c": 106}
+        self.assertTrue(PriceActionBot._check_rejection(candle, "bull"))
 
-    def setUp(self):
-        self.engine = SignalEngine()
+    def test_bearish_rejection(self):
+        """Close in lower half → bearish rejection."""
+        candle = {"o": 100, "h": 110, "l": 90, "c": 94}
+        self.assertTrue(PriceActionBot._check_rejection(candle, "bear"))
 
-    def test_ce_entry_all_gates_pass(self):
-        """Perfect CE setup: sustained + bullish PCR + PE build-up → BUY CE."""
-        signal = self.engine.evaluate(
-            spot_close=22410,
-            support=22400,
-            resistance=22700,
-            focus_pcr=1.25,  # Bullish
-            oi_pattern={'ce_oi_change': 5000, 'pe_oi_change': 80000},  # PE building
-            spot_history=build_spot_history(22410, count=20),
-            expiry_date="2026-04-15",
-            current_date="2026-04-10"
-        )
+    def test_no_rejection_mid_close(self):
+        """Close below midpoint → no bullish rejection."""
+        candle = {"o": 100, "h": 110, "l": 90, "c": 99}
+        # close_pct = (99-90)/(110-90) = 9/20 = 0.45 < 0.5
+        self.assertFalse(PriceActionBot._check_rejection(candle, "bull"))
 
-        self.assertEqual(signal['direction'], "CE")
-        self.assertGreater(signal['score'], 0)
-        # All 3 gates should show PASS
-        pass_count = sum(1 for r in signal['reasons'] if 'PASS' in r)
-        self.assertEqual(pass_count, 3, f"Expected 3 PASS gates, got {pass_count}. Reasons: {signal['reasons']}")
+    def test_doji_no_rejection(self):
+        """Tiny range, close in lower half → no bullish rejection."""
+        candle = {"o": 100, "h": 100.2, "l": 99.8, "c": 99.9}
+        # close_pct = (99.9-99.8)/(100.2-99.8) = 0.1/0.4 = 0.25 < 0.5
+        self.assertFalse(PriceActionBot._check_rejection(candle, "bull"))
 
-    def test_pe_entry_all_gates_pass(self):
-        """Perfect PE setup: sustained + bearish PCR + CE build-up → BUY PE."""
-        signal = self.engine.evaluate(
-            spot_close=22695,
-            support=22300,
-            resistance=22700,
-            focus_pcr=0.65,  # Bearish
-            oi_pattern={'ce_oi_change': 90000, 'pe_oi_change': -5000},  # CE building
-            spot_history=build_spot_history(22695, count=20),
-            expiry_date="2026-04-15",
-            current_date="2026-04-10"
-        )
 
-        self.assertEqual(signal['direction'], "PE")
-        self.assertGreater(signal['score'], 0)
+class TestDailyRiskGuards(unittest.TestCase):
+    """Daily max loss and cooldown guards."""
 
-    def test_ce_entry_neutral_pcr_still_passes(self):
-        """CE entry with neutral PCR (not bearish) should still pass Gate 2."""
-        signal = self.engine.evaluate(
-            spot_close=22410,
-            support=22400,
-            resistance=22700,
-            focus_pcr=0.95,  # Neutral (not bearish)
-            oi_pattern={'ce_oi_change': 5000, 'pe_oi_change': 50000},
-            spot_history=build_spot_history(22410, count=20),
-            expiry_date="2026-04-15",
-            current_date="2026-04-10"
-        )
+    def test_blocked_after_max_loss(self):
+        """After cumulative loss exceeds MAX_DAILY_LOSS, bot blocks."""
+        bot = PriceActionBot(fetcher=None)
+        bot.reset_daily_state()
+        # Multiple losses exceeding 8000
+        bot.on_trade_closed(-5000)
+        bot.on_trade_closed(-4000)
+        self.assertTrue(bot._blocked_by_loss)
 
-        self.assertEqual(signal['direction'], "CE")
+    def test_not_blocked_under_limit(self):
+        """Small loss doesn't trigger block."""
+        bot = PriceActionBot(fetcher=None)
+        bot.reset_daily_state()
+        bot.on_trade_closed(-3000)
+        self.assertFalse(bot._blocked_by_loss)
 
-    def test_no_signal_far_from_walls(self):
-        """Price is midway between support and resistance → No signal."""
-        signal = self.engine.evaluate(
-            spot_close=22550,  # Far from both S=22400 and R=22700
-            support=22400,
-            resistance=22700,
-            focus_pcr=1.25,
-            oi_pattern={'ce_oi_change': 5000, 'pe_oi_change': 50000},
-            spot_history=build_spot_history(22550, count=20),
-            expiry_date="2026-04-15",
-            current_date="2026-04-10"
-        )
+    def test_reset_clears_block(self):
+        """reset_daily_state clears the blocked flag."""
+        bot = PriceActionBot(fetcher=None)
+        bot.on_trade_closed(-10000)
+        self.assertTrue(bot._blocked_by_loss)
+        bot.reset_daily_state()
+        self.assertFalse(bot._blocked_by_loss)
 
-        self.assertIsNone(signal['direction'])
-        self.assertEqual(signal['score'], 0)
-        self.assertTrue(any('No proximity' in r for r in signal['reasons']))
+    def test_no_signal_structure(self):
+        """_no_signal returns correct dict shape."""
+        bot = PriceActionBot(fetcher=None)
+        result = bot._no_signal(["reason1"])
+        self.assertIsNone(result["direction"])
+        self.assertEqual(result["score"], 0)
+        self.assertEqual(result["htf_state"], "neutral")
+        self.assertIn("direction", result)
+        self.assertIn("reasons", result)
+        self.assertIn("dte_risk", result)
 
-    def test_sustain_not_met_no_signal(self):
-        """Price near support but only just arrived (not sustained) → No signal."""
-        # Price was at 22550 for 10 readings, only came to support zone in last 5
-        prices = [22550] * 10 + [22410] * 5
-        signal = self.engine.evaluate(
-            spot_close=22410,
-            support=22400,
-            resistance=22700,
-            focus_pcr=1.25,
-            oi_pattern={'ce_oi_change': 5000, 'pe_oi_change': 50000},
-            spot_history=build_spot_history_varied(prices),
-            expiry_date="2026-04-15",
-            current_date="2026-04-10"
-        )
 
-        self.assertIsNone(signal['direction'])
-        self.assertTrue(any('PENDING' in r for r in signal['reasons']))
+class TestHTFState(unittest.TestCase):
+    """3TF HTF state scoring."""
 
-    def test_pcr_conflict_blocks_ce(self):
-        """Price sustained at support but PCR is bearish → Gate 2 blocks CE."""
-        signal = self.engine.evaluate(
-            spot_close=22410,
-            support=22400,
-            resistance=22700,
-            focus_pcr=0.65,  # Bearish → conflicts with CE entry
-            oi_pattern={'ce_oi_change': 5000, 'pe_oi_change': 50000},
-            spot_history=build_spot_history(22410, count=20),
-            expiry_date="2026-04-15",
-            current_date="2026-04-10"
-        )
-
-        self.assertIsNone(signal['direction'])
-        self.assertTrue(any('GATE 2 FAIL' in r for r in signal['reasons']))
-
-    def test_pcr_conflict_blocks_pe(self):
-        """Price sustained at resistance but PCR is bullish → Gate 2 blocks PE."""
-        signal = self.engine.evaluate(
-            spot_close=22695,
-            support=22300,
-            resistance=22700,
-            focus_pcr=1.30,  # Bullish → conflicts with PE entry
-            oi_pattern={'ce_oi_change': 60000, 'pe_oi_change': -5000},
-            spot_history=build_spot_history(22695, count=20),
-            expiry_date="2026-04-15",
-            current_date="2026-04-10"
-        )
-
-        self.assertIsNone(signal['direction'])
-        self.assertTrue(any('GATE 2 FAIL' in r for r in signal['reasons']))
-
-    def test_oi_unwinding_blocks_ce(self):
-        """Sustained + bullish PCR but PUT OI unwinding → Gate 3 blocks CE."""
-        signal = self.engine.evaluate(
-            spot_close=22410,
-            support=22400,
-            resistance=22700,
-            focus_pcr=1.25,
-            oi_pattern={'ce_oi_change': 5000, 'pe_oi_change': -30000},  # PE unwinding!
-            spot_history=build_spot_history(22410, count=20),
-            expiry_date="2026-04-15",
-            current_date="2026-04-10"
-        )
-
-        self.assertIsNone(signal['direction'])
-        self.assertTrue(any('GATE 3 FAIL' in r for r in signal['reasons']))
-
-    def test_oi_unwinding_blocks_pe(self):
-        """Sustained + bearish PCR but CALL OI unwinding → Gate 3 blocks PE."""
-        signal = self.engine.evaluate(
-            spot_close=22695,
-            support=22300,
-            resistance=22700,
-            focus_pcr=0.65,
-            oi_pattern={'ce_oi_change': -40000, 'pe_oi_change': 10000},  # CE unwinding!
-            spot_history=build_spot_history(22695, count=20),
-            expiry_date="2026-04-15",
-            current_date="2026-04-10"
-        )
-
-        self.assertIsNone(signal['direction'])
-        self.assertTrue(any('GATE 3 FAIL' in r for r in signal['reasons']))
-
-    def test_expiry_day_classification(self):
-        """Trade on expiry day should flag DTE correctly."""
-        signal = self.engine.evaluate(
-            spot_close=22410,
-            support=22400,
-            resistance=22700,
-            focus_pcr=1.25,
-            oi_pattern={'ce_oi_change': 5000, 'pe_oi_change': 50000},
-            spot_history=build_spot_history(22410, count=20),
-            expiry_date="2026-04-10",
-            current_date="2026-04-10"
-        )
-
-        self.assertTrue(signal['is_expiry_day'])
-        self.assertEqual(signal['dte_risk'], "EXTREME")
-        self.assertEqual(signal['dte_days'], 0)
+    def test_htf_state_exists(self):
+        """Method returns valid states."""
+        bot = PriceActionBot(fetcher=None)
+        # Before bootstrap, should return neutral
+        state = bot._get_htf_state(23600, "CE")
+        self.assertIn(state, ["confirm", "neutral", "oppose"])
 
 
 # ==========================================================================
-# DTE Risk Classification Tests
+# DTE Risk Classification Tests (kept from v3)
 # ==========================================================================
 
 class TestDTERisk(unittest.TestCase):
@@ -425,7 +266,7 @@ class TestDTERisk(unittest.TestCase):
 
 if __name__ == "__main__":
     print("=" * 70)
-    print("[TEST] SNIPER ENTRY LOGIC v3.0 -- TEST SUITE")
+    print("[TEST] PRICE ACTION BOT v4.0 -- TEST SUITE")
     print("=" * 70)
     print()
     unittest.main(verbosity=2)

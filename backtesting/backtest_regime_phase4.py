@@ -41,7 +41,7 @@ from regime.classifier import (  # noqa: E402
     ClassifierFeatures,
     Regime,
 )
-from signal_engine import SignalEngine  # noqa: E402
+from signal_engine import PriceActionBot  # noqa: E402
 from backtesting.backtest_regime_phase1 import (  # noqa: E402
     load_spot, load_vix, resample,
 )
@@ -237,7 +237,7 @@ def simulate_one_pass(
     regime_gated: bool,
 ) -> list[Trade]:
     classifier = RegimeClassifier(ClassifierConfig(sustain_min=15))
-    engine = SignalEngine()
+    engine = PriceActionBot()
     trades: list[Trade] = []
 
     trading_days = sorted({d for d in spot_1m.index.date})

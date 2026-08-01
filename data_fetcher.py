@@ -111,7 +111,7 @@ class DataFetcher:
             self.access_token = self._load_access_token()
             if not self.access_token: return
             
-            url = f"{self.base_url}/historical-candle/NSE_INDEX%7CINDIA%20VIX/1day/{(datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d')}/{datetime.now().strftime('%Y-%m-%d')}"
+            url = f"{self.base_url}/historical-candle/NSE_INDEX%7CIndia%20VIX/day/{datetime.now().strftime('%Y-%m-%d')}/{(datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d')}"
             headers = {"Authorization": f"Bearer {self.access_token}", "Accept": "application/json"}
             resp = self.session.get(url, headers=headers, timeout=10)
             data = resp.json().get("data", {}).get("candles", [])
@@ -145,13 +145,23 @@ class DataFetcher:
             # Exponential Backoff Retry Loop
             max_retries = 3
             for attempt in range(max_retries):
-                resp = self.session.get(url, params=params, headers=headers, timeout=10)
-                if resp.status_code == 200:
-                    break
-                if resp.status_code == 401:
-                    logger.error("Token Unauthorized (401). Please run upstox_auth.py again.")
-                    with self.lock: self.cache['last_update'] = 0
-                    return
+                try:
+                    resp = self.session.get(url, params=params, headers=headers, timeout=15)
+                    if resp.status_code == 200:
+                        break
+                    if resp.status_code == 401:
+                        logger.error("Token Unauthorized (401). Please run upstox_auth.py again.")
+                        with self.lock: self.cache['last_update'] = 0
+                        return
+                    if resp.status_code == 429:
+                        logger.warning("Upstox Rate Limit (429) hit. Cooling down for 10 seconds...")
+                        time.sleep(10)
+                        continue
+                except Exception as net_err:
+                    logger.warning(f"Network error on attempt {attempt+1}/{max_retries}: {net_err}")
+                    if attempt == max_retries - 1:
+                        raise # If it's the last attempt, raise it to the main exception handler
+                
                 if attempt < max_retries - 1:
                     time.sleep(2 ** attempt) # Backoff: 1s, 2s
             
@@ -163,8 +173,8 @@ class DataFetcher:
                 logger.warning(f"API returned empty chain for {expiry_date}. Simulating Macro Data for Paper Mode.")
                 with self.lock:
                     self.cache.update({
-                        'pcr': 0.95,
-                        'focus_pcr': 1.0,
+                        'pcr': 0.0,
+                        'focus_pcr': 0.0,
                         'oi_pattern': {'ce_oi_change': 0, 'pe_oi_change': 0},
                         'max_pain_strike': 25300,
                         'max_pain_dist': 10,
@@ -174,8 +184,22 @@ class DataFetcher:
                 return
             # -------------------------------------------------
 
-            pcr = data[0].get("pcr", 1.0)
-            spot = data[0].get("underlying_spot_price", 22500)
+            api_pcr_raw = data[0].get("pcr", 0.0)  # Upstox returns PCR × 1000
+            api_pcr = api_pcr_raw / 1000.0 if api_pcr_raw > 0 else 0.0
+            
+            # Diagnostic: log if PCR is 0 so we can debug API changes
+            if api_pcr_raw == 0:
+                available_keys = list(data[0].keys()) if data else []
+                logger.warning(
+                    f"API PCR is 0! Available keys in data[0]: {available_keys}. "
+                    f"Strikes in chain: {len(data)}. PCR bypass will activate."
+                )
+            
+            spot = data[0].get("underlying_spot_price")
+            if not spot or spot <= 0:
+                spot = self.cache.get('spot', 0)
+            if not spot or spot <= 0:
+                spot = 24000.0  # sensible fallback if cache is empty
 
             # Track spot price history for Sustain Engine
             self.spot_history.append({'time': datetime.now(), 'spot': spot})
@@ -184,7 +208,7 @@ class DataFetcher:
             support_strike, resistance_strike = self._calculate_support_resistance(data, spot)
             change_ce_oi, change_pe_oi, atm_iv = self._extract_oi_and_iv(data, spot)
 
-            # Calculate Focus Zone metrics (7-strike localized PCR + OI patterns)
+            # Calculate Focus Zone PCR (ATM±5 strikes, 11 total) — for OI pattern + logging
             focus_pcr, oi_pattern = self._calculate_focus_zone_metrics(data, spot)
 
             # Track IV history for percentile calculation
@@ -198,8 +222,11 @@ class DataFetcher:
             greeks_map = {}
             ltp_map = {}
             token_map = {}
+            oi_map = {}
+            full_chain_ce_oi = 0
+            full_chain_pe_oi = 0
             for item in data:
-                s = item["strike_price"]
+                s = int(item["strike_price"])
                 ce_g = item.get("call_options", {}).get("option_greeks", {})
                 ce_m = item.get("call_options", {}).get("market_data", {})
                 ce_tk = item.get("call_options", {}).get("instrument_key", "")
@@ -214,13 +241,23 @@ class DataFetcher:
                 ltp_map[f"{s}_CE"] = ce_m.get('ltp', 0)
                 ltp_map[f"{s}_PE"] = pe_m.get('ltp', 0)
                 
+                ce_oi = ce_m.get('oi', 0)
+                pe_oi = pe_m.get('oi', 0)
+                oi_map[f"{s}_CE"] = ce_oi
+                oi_map[f"{s}_PE"] = pe_oi
+                full_chain_ce_oi += ce_oi
+                full_chain_pe_oi += pe_oi
+                
                 token_map[f"{s}_CE"] = ce_tk
                 token_map[f"{s}_PE"] = pe_tk
+
+            calculated_pcr = round(full_chain_pe_oi / full_chain_ce_oi, 2) if full_chain_ce_oi > 0 else 1.0
 
             with self.lock:
                 self.cache.update({
                     'spot': spot,
-                    'pcr': pcr,
+                    'pcr': calculated_pcr,
+                    'api_pcr': calculated_pcr,
                     'focus_pcr': focus_pcr,
                     'oi_pattern': oi_pattern,
                     'max_pain_strike': max_pain_strike,
@@ -233,6 +270,7 @@ class DataFetcher:
                     'iv_history': iv_history,
                     'greeks_map': greeks_map,
                     'ltp_map': ltp_map,
+                    'oi_map': oi_map,
                     'token_map': token_map,
                     'last_update': time.time()
                 })
@@ -243,7 +281,7 @@ class DataFetcher:
                 # Update in-memory option strike histories
                 now_time = datetime.now()
                 for item in data:
-                    s = item["strike_price"]
+                    s = int(item["strike_price"])
                     ce_m = item.get("call_options", {}).get("market_data", {})
                     pe_m = item.get("put_options", {}).get("market_data", {})
                     
@@ -266,7 +304,7 @@ class DataFetcher:
                             'volume': vol
                         })
             logger.info(
-                f"[OK] MACRO | PCR:{pcr:.2f} FocusPCR:{focus_pcr:.2f} | S:{support_strike} R:{resistance_strike} "
+                f"[OK] MACRO | PCR:{api_pcr:.2f} FocusPCR:{focus_pcr:.2f} | S:{support_strike} R:{resistance_strike} "
                 f"| MaxPain:{max_pain_strike} | CE-OI-Chg:{change_ce_oi} PE-OI-Chg:{change_pe_oi} "
                 f"| FZ-CE-Chg:{oi_pattern['ce_oi_change']} FZ-PE-Chg:{oi_pattern['pe_oi_change']} | IV:{atm_iv:.1f}"
             )
@@ -274,7 +312,7 @@ class DataFetcher:
             # --- Log 7-strike Focus Zone Async (per-strike row) ---
             self._log_focus_zone(spot, data)
             # --- Log macro snapshot async (1 row/min: VIX, PCR, max-pain, ...) ---
-            self._log_macro_snapshot(spot, pcr, focus_pcr, max_pain_strike,
+            self._log_macro_snapshot(spot, api_pcr, focus_pcr, max_pain_strike,
                                      max_pain_dist, support_strike, resistance_strike,
                                      change_ce_oi, change_pe_oi, oi_pattern, atm_iv)
             
@@ -305,9 +343,8 @@ class DataFetcher:
             if not strikes: return
 
             atm = min(strikes, key=lambda x: abs(x - spot))
-            # Store ATM ± 7 (15 strikes total) so we can audit trades on
-            # ITM/OTM legs that drift far from the wall during big moves.
-            focus_zone = [atm + (i * self.strike_step) for i in range(-7, 8)]
+            # Store ATM ± 10 (21 strikes total) to capture full market breadth
+            focus_zone = [atm + (i * self.strike_step) for i in range(-10, 11)]
 
             today = now_ist.strftime("%Y-%m-%d")
             timestamp = now_ist.strftime("%Y-%m-%d %H:%M:%S")
@@ -437,10 +474,10 @@ class DataFetcher:
 
     def _calculate_focus_zone_metrics(self, chain, spot):
         """
-        Calculate PCR and OI change patterns from the 7-strike Focus Zone ONLY.
-        Focus Zone = ATM ± 3 strikes (7 total).
+        Calculate PCR and OI change patterns from the 11-strike Focus Zone ONLY.
+        Focus Zone = ATM ± 5 strikes (11 total).
         
-        This gives a hyper-localized view of institutional money flow,
+        This gives a localized view of institutional money flow,
         filtering out the noise from deep ITM/OTM strikes.
         """
         strikes = [item["strike_price"] for item in chain]
@@ -448,7 +485,7 @@ class DataFetcher:
             return 1.0, {'ce_oi_change': 0, 'pe_oi_change': 0}
 
         atm = min(strikes, key=lambda x: abs(x - spot))
-        focus_zone = [atm + (i * self.strike_step) for i in range(-3, 4)]
+        focus_zone = [atm + (i * self.strike_step) for i in range(-10, 11)]
 
         total_ce_oi = 0
         total_pe_oi = 0
@@ -490,8 +527,8 @@ class DataFetcher:
         if not strikes: return 0, 0
         
         atm = min(strikes, key=lambda x: abs(x - spot))
-        # Limit the painful loop strictly to 10 strikes around ATM
-        focus_strikes = [atm + (i * self.strike_step) for i in range(-5, 6)]
+        # Limit the painful loop strictly to ATM ± 10 strikes for expanded accuracy
+        focus_strikes = [atm + (i * self.strike_step) for i in range(-10, 11)]
         
         pain = {}
         for s in focus_strikes:
@@ -568,7 +605,14 @@ class DataFetcher:
         def loop():
             while True:
                 self._fetch_chain()
-                time.sleep(60) # Every 1 minute for Live Tracking
+                try:
+                    today = datetime.now(IST).date().isoformat()
+                    if self._get_expiry() == today:
+                        time.sleep(5)   # 5-second hyper-fast tracking on Expiry
+                    else:
+                        time.sleep(15)  # 15-second fast tracking on Normal Days
+                except Exception:
+                    time.sleep(15)
         threading.Thread(target=loop, daemon=True).start()
 
     def get_spot(self): return self.cache.get('spot', 0)
@@ -583,6 +627,10 @@ class DataFetcher:
     def get_atm_iv(self): return self.cache.get('atm_iv', 0)
     def get_iv_history(self): return self.cache.get('iv_history', [])
     def get_india_vix(self): return self.vix_history[-1] if self.vix_history else 13.5
+    def get_greeks_map(self): return self.cache.get('greeks_map', {})
+    def get_ltp_map(self): return self.cache.get('ltp_map', {})
+    def get_oi_map(self): return self.cache.get('oi_map', {})
+    def get_token_map(self): return self.cache.get('token_map', {})
     def get_strike_greeks(self, strike, opt_type):
         mapping = self.cache.get('greeks_map', {})
         return mapping.get(f"{float(strike)}_{opt_type}", mapping.get(f"{int(strike)}_{opt_type}", {'delta': 0, 'theta': 0, 'gamma': 0}))
@@ -648,3 +696,55 @@ class DataFetcher:
         except:
             pass
         return 0
+
+    def get_historical_daily_ohlc(self, from_date: str, to_date: str) -> list[dict]:
+        """
+        Fetch daily OHLC candles for the trading index from the Upstox
+        Historical Candle API.
+
+        Args:
+            from_date: Start date in YYYY-MM-DD format
+            to_date:   End date in YYYY-MM-DD format
+
+        Returns:
+            List of dicts: [{"date", "open", "high", "low", "close"}, ...]
+            sorted oldest → newest.
+        """
+        try:
+            self.access_token = self._load_access_token()
+            if not self.access_token:
+                logger.error("No access token for historical OHLC fetch")
+                return []
+
+            # URL-encode the instrument key (same pattern as VIX preload)
+            inst = self.instrument_key.replace("|", "%7C").replace(" ", "%20")
+            url = f"{self.base_url}/historical-candle/{inst}/day/{to_date}/{from_date}"
+            headers = {
+                "Authorization": f"Bearer {self.access_token}",
+                "Accept": "application/json",
+            }
+            resp = self.session.get(url, headers=headers, timeout=15)
+            if resp.status_code != 200:
+                logger.error(f"Historical OHLC API error: {resp.status_code}")
+                return []
+
+            candles = resp.json().get("data", {}).get("candles", [])
+            # Upstox candle format: [timestamp, O, H, L, C, V, OI]
+            rows = []
+            for c in candles:
+                dt_str = c[0][:10]  # "2026-06-25T00:00:00+05:30" → "2026-06-25"
+                rows.append({
+                    "date": dt_str,
+                    "open": float(c[1]),
+                    "high": float(c[2]),
+                    "low": float(c[3]),
+                    "close": float(c[4]),
+                })
+
+            # API returns newest first; reverse to oldest → newest
+            rows.sort(key=lambda r: r["date"])
+            logger.info(f"[HIST] Fetched {len(rows)} daily candles ({from_date} → {to_date})")
+            return rows
+        except Exception as e:
+            logger.error(f"Historical OHLC fetch failed: {e}")
+            return []

@@ -29,7 +29,7 @@ sys.path.insert(0, str(ROOT))
 
 from regime.classifier import RegimeClassifier, ClassifierConfig, Regime
 from regime.classifier import ClassifierFeatures
-from signal_engine import SignalEngine
+from signal_engine import PriceActionBot
 from backtesting.backtest_regime_phase1 import load_spot, load_vix, resample
 from backtesting.backtest_regime_phase4 import (
     load_daily_chain,
@@ -172,7 +172,7 @@ def run_one(spot_1m: pd.DataFrame, vix_1m: pd.DataFrame | None,
             chains: dict, time_stop: int, half_range: int) -> list[Trade]:
     """Run one simulation pass."""
     classifier = RegimeClassifier(ClassifierConfig(sustain_min=15))
-    engine = SignalEngine()
+    engine = PriceActionBot()
     trades: list[Trade] = []
 
     for day, lookup in chains.items():

@@ -10,6 +10,7 @@ import { motion, AnimatePresence } from "framer-motion";
 
 import IndicesTicker from "@/components/IndicesTicker";
 import BotControl from "@/components/BotControl";
+import DataCollectorControl from "@/components/DataCollectorControl";
 import EngineStatePanel from "@/components/EngineStatePanel";
 import NearMissFeed from "@/components/NearMissFeed";
 import PnlSparkline from "@/components/PnlSparkline";
@@ -22,7 +23,7 @@ import type {
 
 // Active bots first (Recommended for live), retired lab bots last.
 // NIFTY_SELLER added 2026-05-17 — runs Iron Condor on RANGE days.
-const BOT_LIST: BotName[] = ["NIFTY_REGIME", "SENSEX_REGIME", "NIFTY_SELLER", "NIFTY", "SENSEX", "NIFTY_T1", "NIFTY_T2"];
+const BOT_LIST: BotName[] = ["NIFTY", "SENSEX", "NIFTY_SELLER"];
 type Tab = "live" | "control" | "logs" | "trades";
 
 export default function Dashboard() {
@@ -128,6 +129,18 @@ export default function Dashboard() {
     }, 800);
   };
 
+  const toggleDataCollector = async (dcName: string, isRunning: boolean) => {
+    const index = dcName.replace("_DATA", "");
+    const action = isRunning ? "stop" : "start";
+    setLoading((prev) => ({ ...prev, [dcName]: true }));
+    try {
+      await fetch(`${apiBase}/data-collector/${action}/${index}`, { method: "POST" });
+    } catch {}
+    setTimeout(() => {
+      setLoading((prev) => ({ ...prev, [dcName]: false }));
+    }, 800);
+  };
+
   const startLogin = async () => {
     setAuthError("");
     setAuthUrl("");
@@ -149,9 +162,6 @@ export default function Dashboard() {
       }
       const d = await r.json();
       setAuthUrl(d.url);
-      // Try to open in new tab; popup blockers may block it after the
-      // async/await, but the URL is also rendered as a clickable link
-      // in the modal below so the user can always proceed manually.
       try {
         window.open(d.url, "_blank", "noopener");
       } catch {
@@ -281,7 +291,7 @@ export default function Dashboard() {
           />
           <StatCard
             label="Position"
-            value={stats?.open_position ? `${stats.open_position.strike}` : "—"}
+            value={stats?.open_position ? (stats.open_position.trade_type === "IRON_CONDOR" ? "Spread" : `${stats.open_position.strike}`) : "—"}
             sub={stats?.open_position ? stats.open_position.trade_type : "No trade"}
             icon={
               <Zap
@@ -327,6 +337,12 @@ export default function Dashboard() {
               statuses={statuses}
               loading={loading}
               onToggle={toggleBot}
+            />
+            <DataCollectorControl
+              statuses={statuses}
+              loading={loading}
+              apiBase={apiBase}
+              onToggle={toggleDataCollector}
             />
             {!isAuth ? (
               <div className="glass p-4 border-l-4 border-l-amber-500">

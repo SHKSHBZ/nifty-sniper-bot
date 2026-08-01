@@ -2,6 +2,28 @@
 
 import type { Trade } from "@/types";
 
+function getStrikeDisplay(t: Trade): string {
+  if (t.strike !== undefined && t.strike !== null) {
+    return t.strike.toString();
+  }
+  if (t.strikes && t.strikes.length > 0) {
+    return t.strikes.join(", ");
+  }
+  return "-";
+}
+
+function getEntryExitDisplay(t: Trade, decimals: number = 2): string {
+  if (t.entry_price !== undefined && t.entry_price !== null && t.exit_price !== undefined && t.exit_price !== null) {
+    return `₹${t.entry_price.toFixed(decimals)} → ₹${t.exit_price.toFixed(decimals)}`;
+  }
+  if (t.entry_premiums && t.exit_premiums) {
+    const entrySum = Object.values(t.entry_premiums).reduce((a, b) => a + b, 0);
+    const exitSum = Object.values(t.exit_premiums).reduce((a, b) => a + b, 0);
+    return `₹${entrySum.toFixed(decimals)} → ₹${exitSum.toFixed(decimals)}`;
+  }
+  return "-";
+}
+
 interface Props {
   trades: Trade[];
 }
@@ -65,9 +87,9 @@ export default function TradesTable({ trades }: Props) {
                       {formatTime(t.exit_time)}
                     </td>
                     <td className="px-4 py-3 font-bold">{t.trade_type}</td>
-                    <td className="px-4 py-3">{t.strike}</td>
+                    <td className="px-4 py-3">{getStrikeDisplay(t)}</td>
                     <td className="px-4 py-3 font-mono text-xs">
-                      ₹{t.entry_price.toFixed(2)} → ₹{t.exit_price.toFixed(2)}
+                      {getEntryExitDisplay(t)}
                     </td>
                     <td
                       className={`px-4 py-3 font-bold tabular-nums ${
@@ -105,9 +127,9 @@ function TradeCard({ t }: { t: Trade }) {
         </span>
       </div>
       <div className="flex items-center justify-between text-[11px] text-slate-400">
-        <span>Strike {t.strike}</span>
+        <span>Strike {getStrikeDisplay(t)}</span>
         <span className="font-mono">
-          ₹{t.entry_price} → ₹{t.exit_price}
+          {getEntryExitDisplay(t)}
         </span>
       </div>
       <div className="text-[10px] text-slate-500 mt-1">{t.reason}</div>

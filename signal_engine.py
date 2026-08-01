@@ -1,12 +1,12 @@
-"""
+﻿"""
 signal_engine.py
 ================
-Sniper Entry Engine v3.0 — Institutional-Grade Options Entry Logic.
+Sniper Entry Engine v3.0 ΓÇö Institutional-Grade Options Entry Logic.
 
 Three-gate entry system:
-  Gate 1: Spot Sustain Check — Price must hold near OI wall for 3 consecutive 5m candles.
-  Gate 2: Focus Zone PCR — Localized 7-strike PCR must confirm directional bias.
-  Gate 3: OI Build-Up Confirmation — Option writers must be actively defending the wall.
+  Gate 1: Spot Sustain Check ΓÇö Price must hold near OI wall for 3 consecutive 5m candles.
+  Gate 2: Focus Zone PCR ΓÇö Localized 7-strike PCR must confirm directional bias.
+  Gate 3: OI Build-Up Confirmation ΓÇö Option writers must be actively defending the wall.
 """
 
 import json
@@ -46,18 +46,18 @@ FOCUS_PCR_BULLISH_THRESHOLD = 1.1    # PCR above this = bullish (heavy Put writi
 FOCUS_PCR_BEARISH_THRESHOLD = 0.85   # PCR below this = bearish (heavy Call writing)
 
 # Gate 2: PCR must lie inside an *entry band* (Goldilocks zone).
-# Below the lower bound  = flow not strong enough → block.
+# Below the lower bound  = flow not strong enough ΓåÆ block.
 # Above the upper bound  = move is over-extended; entering now = chasing
-#                          → block (most reversals happen at PCR extremes).
-# Inside the band        = early-enough confirmation → fire.
+#                          ΓåÆ block (most reversals happen at PCR extremes).
+# Inside the band        = early-enough confirmation ΓåÆ fire.
 FOCUS_PCR_CE_ENTRY_LOW  = 0.85   # Widened from 1.00
 FOCUS_PCR_CE_ENTRY_HIGH = 1.60   # Widened from 1.30
 
 FOCUS_PCR_PE_ENTRY_LOW  = 0.40   # Widened from 0.50
 FOCUS_PCR_PE_ENTRY_HIGH = 1.15   # Widened from 0.95
 
-# Gate 2 vigilance sub-gates — added 2026-05-09 after analysing 2026-05-08
-# loss day. Bot took CE at PCR=1.05 while PCR was collapsing (1.15→0.85)
+# Gate 2 vigilance sub-gates ΓÇö added 2026-05-09 after analysing 2026-05-08
+# loss day. Bot took CE at PCR=1.05 while PCR was collapsing (1.15ΓåÆ0.85)
 # and CE-OI was building (call writers stacking resistance). Snapshot gates
 # missed both. These two checks add TREND awareness on top of the band.
 PCR_SLOPE_LOOKBACK_MINUTES = PARAMS.get("pcrSlopeLookbackMinutes", 30)
@@ -65,11 +65,11 @@ PCR_SLOPE_MAX_DROP         = PARAMS.get("pcrSlopeMaxDrop", 0.05)
 OI_DELTA_RATIO_MAX         = PARAMS.get("oiDeltaRatioMax", 1.5)
 
 # PR 4: pre-Gate-1 context filters.
-# VWAP filter — gate CE entries below VWAP, PE entries above VWAP.
+# VWAP filter ΓÇö gate CE entries below VWAP, PE entries above VWAP.
 # Cheap structural sanity: never long below the average price, never
 # short above it.
 VWAP_FILTER_ENABLED  = bool(PARAMS.get("vwapFilterEnabled", True))
-# Range/chop detector — if 60-min spot range is < this fraction of
+# Range/chop detector ΓÇö if 60-min spot range is < this fraction of
 # spot, skip directional entries (no edge in tight chop).
 CHOP_DETECTOR_ENABLED  = bool(PARAMS.get("chopDetectorEnabled", True))
 CHOP_RANGE_LOOKBACK_MIN = int(PARAMS.get("chopRangeLookbackMinutes", 60))
@@ -101,7 +101,7 @@ def check_sustain(spot_history, level, proximity_pct=None,
         proximity_pct = PROXIMITY_PCT
 
     # Need at least (required_ticks - 1) * interval + 1 readings
-    # For 3 ticks at 5m intervals with 1m polling: indices -1, -6, -11 → need 11 readings
+    # For 3 ticks at 5m intervals with 1m polling: indices -1, -6, -11 ΓåÆ need 11 readings
     min_readings = (required_ticks - 1) * tick_interval + 1
     if len(spot_history) < min_readings:
         return False
@@ -139,9 +139,9 @@ def interpret_focus_pcr(focus_pcr):
     Returns: 'bullish', 'bearish', or 'neutral'
     """
     if focus_pcr >= FOCUS_PCR_BULLISH_THRESHOLD:
-        return "bullish"      # Heavy Put OI near ATM → writers defending support
+        return "bullish"      # Heavy Put OI near ATM ΓåÆ writers defending support
     elif focus_pcr <= FOCUS_PCR_BEARISH_THRESHOLD:
-        return "bearish"      # Heavy Call OI near ATM → writers defending resistance
+        return "bearish"      # Heavy Call OI near ATM ΓåÆ writers defending resistance
     return "neutral"          # Contested zone, no clear conviction
 
 
@@ -154,12 +154,12 @@ def check_oi_confirmation(oi_pattern, direction):
     the support/resistance wall, not unwinding/exiting.
 
     For CE Entry (Support Bounce):
-      → Put writers should be ADDING OI (pe_oi_change > 0)
-      → They are confident support will hold
+      ΓåÆ Put writers should be ADDING OI (pe_oi_change > 0)
+      ΓåÆ They are confident support will hold
 
     For PE Entry (Resistance Rejection):
-      → Call writers should be ADDING OI (ce_oi_change > 0)
-      → They are confident resistance will hold
+      ΓåÆ Call writers should be ADDING OI (ce_oi_change > 0)
+      ΓåÆ They are confident resistance will hold
 
     Args:
         oi_pattern: dict with 'ce_oi_change' and 'pe_oi_change' (from focus zone)
@@ -173,19 +173,19 @@ def check_oi_confirmation(oi_pattern, direction):
 
     if direction == "CE":
         if pe_change > 0:
-            return True, f"PUT OI Build-Up (+{pe_change}) → Writers defending support"
+            return True, f"PUT OI Build-Up (+{pe_change}) ΓåÆ Writers defending support"
         elif pe_change < 0:
-            return False, f"PUT OI Unwinding ({pe_change}) → Support weakening"
+            return False, f"PUT OI Unwinding ({pe_change}) ΓåÆ Support weakening"
         else:
-            return False, "PUT OI unchanged → No conviction"
+            return False, "PUT OI unchanged ΓåÆ No conviction"
 
     elif direction == "PE":
         if ce_change > 0:
-            return True, f"CALL OI Build-Up (+{ce_change}) → Writers defending resistance"
+            return True, f"CALL OI Build-Up (+{ce_change}) ΓåÆ Writers defending resistance"
         elif ce_change < 0:
-            return False, f"CALL OI Unwinding ({ce_change}) → Resistance weakening"
+            return False, f"CALL OI Unwinding ({ce_change}) ΓåÆ Resistance weakening"
         else:
-            return False, "CALL OI unchanged → No conviction"
+            return False, "CALL OI unchanged ΓåÆ No conviction"
 
     return False, "Unknown direction"
 
@@ -420,7 +420,7 @@ class SignalEngine:
     @staticmethod
     def _compute_session_vwap(spot_history):
         """Cheap VWAP approximation. Bot has no per-tick volume data, so we
-        use simple average of spot ticks — a reasonable proxy of session
+        use simple average of spot ticks ΓÇö a reasonable proxy of session
         average price for filter-quality decisions."""
         if not spot_history:
             return None
@@ -468,19 +468,19 @@ class SignalEngine:
         delta = focus_pcr - ref_pcr
         if direction == "CE":
             if delta < -PCR_SLOPE_MAX_DROP:
-                return False, (f"PCR collapsing: {ref_pcr:.2f} → {focus_pcr:.2f} "
-                               f"(Δ {delta:+.2f}) over {PCR_SLOPE_LOOKBACK_MINUTES}m. "
-                               f"Bears stepping in — block CE.")
-            return True, f"PCR slope OK: {ref_pcr:.2f} → {focus_pcr:.2f} (Δ {delta:+.2f})"
+                return False, (f"PCR collapsing: {ref_pcr:.2f} ΓåÆ {focus_pcr:.2f} "
+                               f"(╬ö {delta:+.2f}) over {PCR_SLOPE_LOOKBACK_MINUTES}m. "
+                               f"Bears stepping in ΓÇö block CE.")
+            return True, f"PCR slope OK: {ref_pcr:.2f} ΓåÆ {focus_pcr:.2f} (╬ö {delta:+.2f})"
         else:  # PE
             if delta > PCR_SLOPE_MAX_DROP:
-                return False, (f"PCR rallying: {ref_pcr:.2f} → {focus_pcr:.2f} "
-                               f"(Δ {delta:+.2f}) over {PCR_SLOPE_LOOKBACK_MINUTES}m. "
-                               f"Bulls stepping in — block PE.")
-            return True, f"PCR slope OK: {ref_pcr:.2f} → {focus_pcr:.2f} (Δ {delta:+.2f})"
+                return False, (f"PCR rallying: {ref_pcr:.2f} ΓåÆ {focus_pcr:.2f} "
+                               f"(╬ö {delta:+.2f}) over {PCR_SLOPE_LOOKBACK_MINUTES}m. "
+                               f"Bulls stepping in ΓÇö block PE.")
+            return True, f"PCR slope OK: {ref_pcr:.2f} ΓåÆ {focus_pcr:.2f} (╬ö {delta:+.2f})"
 
     def _check_oi_delta_ratio(self, now, oi_pattern, direction):
-        """For CE: ΔCE_OI must NOT be more than RATIO × ΔPE_OI (call writing dominant = bearish).
+        """For CE: ╬öCE_OI must NOT be more than RATIO ├ù ╬öPE_OI (call writing dominant = bearish).
         For PE: inverse. Default-pass during warmup or when both deltas are tiny."""
         ref = self._lookback_sample(now, PCR_SLOPE_LOOKBACK_MINUTES)
         if ref is None:
@@ -490,31 +490,35 @@ class SignalEngine:
         cur_pe_oi = oi_pattern.get('total_pe_oi', 0) if isinstance(oi_pattern, dict) else 0
         d_ce = cur_ce_oi - ref_ce_oi
         d_pe = cur_pe_oi - ref_pe_oi
-        # If neither side is meaningfully changing, no signal — pass.
+        # If neither side is meaningfully changing, no signal ΓÇö pass.
         if max(abs(d_ce), abs(d_pe)) < 1000:
-            return True, f"OI delta: flat (Δce={d_ce:+,.0f}, Δpe={d_pe:+,.0f})"
+            return True, f"OI delta: flat (╬öce={d_ce:+,.0f}, ╬öpe={d_pe:+,.0f})"
         if direction == "CE":
             # Bears writing calls faster than puts? Block.
             if d_ce > 0 and d_pe <= 0:
                 return False, (f"Call writers stacking, put writers absent: "
-                               f"Δce={d_ce:+,.0f}, Δpe={d_pe:+,.0f} — block CE.")
+                               f"╬öce={d_ce:+,.0f}, ╬öpe={d_pe:+,.0f} ΓÇö block CE.")
             if d_pe > 0 and d_ce > OI_DELTA_RATIO_MAX * d_pe:
                 return False, (f"Call OI build outpacing put OI build "
-                               f"({d_ce:+,.0f} > {OI_DELTA_RATIO_MAX}×{d_pe:+,.0f}) — block CE.")
-            return True, f"OI delta OK: Δce={d_ce:+,.0f}, Δpe={d_pe:+,.0f}"
+                               f"({d_ce:+,.0f} > {OI_DELTA_RATIO_MAX}├ù{d_pe:+,.0f}) ΓÇö block CE.")
+            return True, f"OI delta OK: ╬öce={d_ce:+,.0f}, ╬öpe={d_pe:+,.0f}"
         else:  # PE
             if d_pe > 0 and d_ce <= 0:
                 return False, (f"Put writers stacking, call writers absent: "
-                               f"Δpe={d_pe:+,.0f}, Δce={d_ce:+,.0f} — block PE.")
+                               f"╬öpe={d_pe:+,.0f}, ╬öce={d_ce:+,.0f} ΓÇö block PE.")
             if d_ce > 0 and d_pe > OI_DELTA_RATIO_MAX * d_ce:
                 return False, (f"Put OI build outpacing call OI build "
-                               f"({d_pe:+,.0f} > {OI_DELTA_RATIO_MAX}×{d_ce:+,.0f}) — block PE.")
-            return True, f"OI delta OK: Δce={d_ce:+,.0f}, Δpe={d_pe:+,.0f}"
+                               f"({d_pe:+,.0f} > {OI_DELTA_RATIO_MAX}├ù{d_ce:+,.0f}) ΓÇö block PE.")
+            return True, f"OI delta OK: ╬öce={d_ce:+,.0f}, ╬öpe={d_pe:+,.0f}"
 
-    def _classify_fyers_quadrant(self, strike, opt_type, data_fetcher, lookback_minutes=15):
+    def _classify_fyers_quadrant(self, strike, opt_type, data_fetcher, lookback_minutes=5):
         """
         Classify option positioning into one of the 4 Fyers Quadrants.
         Returns: 'LONG_BUILDUP', 'SHORT_BUILDUP', 'SHORT_COVERING', 'LONG_UNWINDING', or 'WARMUP'
+        
+        v3.6: Reduced default lookback from 15→5 min to catch intra-candle reversals.
+        The 15-min window was too slow on expiry/trending days where PE premium
+        peaks and reverses within a single 5-min candle.
         """
         history = data_fetcher.get_option_history(strike, opt_type)
         if len(history) < 5:
@@ -637,19 +641,31 @@ class SignalEngine:
             mem_status = self.memory.check_role_reversal(resistance, spot_close, "RESISTANCE")
             if mem_status == "SUPPORT_RECLAIMED" and conviction_score > 3.0:
                 is_reclaim = True
-                reasons.append(f"🔄 PILLAR 3: Resistance {resistance} RECLAIMED as Support. Switching bias to CE.")
+                reasons.append(f"≡ƒöä PILLAR 3: Resistance {resistance} RECLAIMED as Support. Switching bias to CE.")
 
         # ==========================================
         # SIGNAL LOGIC (MASTER CONFLUENCE)
         # ==========================================
         
+        # ── v3.6: Detect expiry day for relaxed conviction threshold ──
+        # Must be computed BEFORE the if/elif chain — both CE and PE paths use it.
+        is_expiry = False
+        if expiry_date and current_date:
+            try:
+                exp = datetime.strptime(expiry_date, "%Y-%m-%d").date()
+                cur = datetime.strptime(current_date, "%Y-%m-%d").date()
+                is_expiry = (exp - cur).days <= 1
+            except (ValueError, TypeError):
+                pass
+        _conv_threshold = 1.5 if is_expiry else 3.0
+        
         # Priority 1: Support Reclaim (High Gamma Breakout)
         if is_reclaim:
             if ms_trend == "DOWNTREND":
-                reasons.append(f"❌ TOPIC 2 FAIL: Role Reversal detected but blocked by Structural DOWNTREND.")
+                reasons.append(f"Γ¥î TOPIC 2 FAIL: Role Reversal detected but blocked by Structural DOWNTREND.")
             else:
                 direction = "CE"
-                reasons.append(f"✅ SIGNAL: Role Reversal detected at {resistance}. Institutional Score: {conviction_score:.1f}")
+                reasons.append(f"Γ£à SIGNAL: Role Reversal detected at {resistance}. Institutional Score: {conviction_score:.1f}")
         
         # Priority 2: Standard Support Bounce with Full Confluence
         elif near_support:
@@ -662,39 +678,47 @@ class SignalEngine:
                     # 1. S/R Migration Gate
                     sr_migration = data_fetcher.get_sr_migration()
                     if sr_migration == "BEARISH_SHIFT":
-                        reasons.append(f"❌ FYERS PILLAR C FAIL: S/R walls are shifting BEARISH ({sr_migration}). Blocking CE entry.")
+                        reasons.append(f"Γ¥î FYERS PILLAR C FAIL: S/R walls are shifting BEARISH ({sr_migration}). Blocking CE entry.")
                         conviction_score = min(conviction_score, 0.0)
                     
                     # 2. Price-OI Quadrant Check on Put Options (Writers defending)
                     put_quad = self._classify_fyers_quadrant(support, "PE", data_fetcher)
                     if put_quad == "LONG_BUILDUP":
-                        reasons.append(f"❌ FYERS PILLAR B FAIL: Support {support} is experiencing PUT LONG_BUILDUP (speculative put buying). Blocking CE entry.")
+                        reasons.append(f"Γ¥î FYERS PILLAR B FAIL: Support {support} is experiencing PUT LONG_BUILDUP (speculative put buying). Blocking CE entry.")
                         conviction_score = min(conviction_score, 0.0)
                     elif put_quad == "SHORT_BUILDUP":
-                        reasons.append(f"📊 FYERS PILLAR B PASS: Support {support} confirmed PUT SHORT_BUILDUP (institutional put writing).")
+                        reasons.append(f"≡ƒôè FYERS PILLAR B PASS: Support {support} confirmed PUT SHORT_BUILDUP (institutional put writing).")
                         
                     # 3. Call Option Volume-Premium Momentum Gate
                     ce_vol_ok = self._check_option_volume_momentum(support, "CE", data_fetcher)
                     if not ce_vol_ok:
-                        reasons.append(f"❌ FYERS PILLAR A FAIL: CE premium at {support} has low volume participation. Blocking CE entry.")
+                        reasons.append(f"Γ¥î FYERS PILLAR A FAIL: CE premium at {support} has low volume participation. Blocking CE entry.")
                         conviction_score = min(conviction_score, 0.0)
 
                 # FULL CONFLUENCE: OI + VIC + Pattern + Candle + VOLUME
-                if conviction_score >= 3.0:
+                if conviction_score >= _conv_threshold:
                     if ms_trend == "DOWNTREND":
-                        reasons.append(f"❌ TOPIC 2 FAIL: Conviction high, but Structure is DOWNTREND. Block CE.")
+                        reasons.append(f"Γ¥î TOPIC 2 FAIL: Conviction high, but Structure is DOWNTREND. Block CE.")
                     else:
-                        # NEW: Volume & Candle Trigger
-                        if (candle_trigger in ["HAMMER", "BULLISH_ENGULFING"] and vol_score > 1.2) or scalp_mode:
+                        # v3.6: Relaxed volume/candle gate.
+                        # When FYERS confirms SHORT_BUILDUP at support, the institutional
+                        # put-writing signal alone is strong enough — don't require vol spike
+                        # or candle pattern on top.  The original gate (vol_score>1.2 + candle)
+                        # blocked 80%+ of signals on tight-range / expiry days.
+                        _fy_passed = any("FYERS PILLAR B PASS" in r for r in reasons)
+                        _vol_candle_ok = (candle_trigger in ["HAMMER", "BULLISH_ENGULFING"] and vol_score > 1.2)
+                        if _vol_candle_ok or scalp_mode or _fy_passed:
                             direction = "CE"
                             conf_msg = f"Bullish Flow ({vic_signal})"
-                            if vol_score > 1.5: conf_msg += f" + 📊 VOL SPIKE ({vol_score:.1f}x)"
-                            if candle_trigger: conf_msg += f" + 🔥 {candle_trigger}"
-                            reasons.append(f"✅ MASTER CONFLUENCE: {conf_msg} at Support {support}. Structure: {ms_trend}.")
+                            if vol_score > 1.5: conf_msg += f" + ≡ƒôè VOL SPIKE ({vol_score:.1f}x)"
+                            if candle_trigger: conf_msg += f" + ≡ƒöÑ {candle_trigger}"
+                            if _fy_passed and not _vol_candle_ok:
+                                conf_msg += " (FYERS-confirmed, vol/candle bypassed)"
+                            reasons.append(f"Γ£à MASTER CONFLUENCE: {conf_msg} at Support {support}. Structure: {ms_trend}.")
                         else:
                             reasons.append(f"[WAIT] TOPIC 6: Near Support, but waiting for Volume Participation (Score: {vol_score:.1f}) and Candle Trigger.")
                 else:
-                    reasons.append(f"❌ PILLAR 1 FAIL: Low Institutional Conviction (Score: {conviction_score:.1f}). Block CE.")
+                    reasons.append(f"Γ¥î PILLAR 1 FAIL: Low Institutional Conviction (Score: {conviction_score:.1f}). Block CE.")
             else:
                 reasons.append(f"[WAIT] GATE 1: Price near Support {support} but sustain not confirmed.")
 
@@ -709,37 +733,43 @@ class SignalEngine:
                     # 1. S/R Migration Gate
                     sr_migration = data_fetcher.get_sr_migration()
                     if sr_migration == "BULLISH_SHIFT":
-                        reasons.append(f"❌ FYERS PILLAR C FAIL: S/R walls are shifting BULLISH ({sr_migration}). Blocking PE entry.")
+                        reasons.append(f"Γ¥î FYERS PILLAR C FAIL: S/R walls are shifting BULLISH ({sr_migration}). Blocking PE entry.")
                         conviction_score = max(conviction_score, 0.0)
                     
                     # 2. Price-OI Quadrant Check on Call Options (Writers defending)
                     call_quad = self._classify_fyers_quadrant(resistance, "CE", data_fetcher)
                     if call_quad == "LONG_BUILDUP":
-                        reasons.append(f"❌ FYERS PILLAR B FAIL: Resistance {resistance} is experiencing CALL LONG_BUILDUP (speculative call buying). Blocking PE entry.")
+                        reasons.append(f"Γ¥î FYERS PILLAR B FAIL: Resistance {resistance} is experiencing CALL LONG_BUILDUP (speculative call buying). Blocking PE entry.")
                         conviction_score = max(conviction_score, 0.0)
                     elif call_quad == "SHORT_BUILDUP":
-                        reasons.append(f"📊 FYERS PILLAR B PASS: Resistance {resistance} confirmed CALL SHORT_BUILDUP (institutional call writing).")
+                        reasons.append(f"≡ƒôè FYERS PILLAR B PASS: Resistance {resistance} confirmed CALL SHORT_BUILDUP (institutional call writing).")
                         
                     # 3. Put Option Volume-Premium Momentum Gate
                     pe_vol_ok = self._check_option_volume_momentum(resistance, "PE", data_fetcher)
                     if not pe_vol_ok:
-                        reasons.append(f"❌ FYERS PILLAR A FAIL: PE premium at {resistance} has low volume participation. Blocking PE entry.")
+                        reasons.append(f"Γ¥î FYERS PILLAR A FAIL: PE premium at {resistance} has low volume participation. Blocking PE entry.")
                         conviction_score = max(conviction_score, 0.0)
 
-                if conviction_score <= -3.0:
+                if conviction_score <= -_conv_threshold:
                     if ms_trend == "UPTREND":
-                        reasons.append(f"❌ TOPIC 2 FAIL: Bearish conviction, but Structure is UPTREND. Block PE.")
+                        reasons.append(f"Γ¥î TOPIC 2 FAIL: Bearish conviction, but Structure is UPTREND. Block PE.")
                     else:
-                        if (candle_trigger in ["SHOOTING_STAR", "BEARISH_ENGULFING"] and vol_score > 1.2) or scalp_mode:
+                        # v3.6: Same relaxed gate for PE — FYERS-confirmed CALL SHORT_BUILDUP
+                        # at resistance is strong enough on its own.
+                        _fy_pe_passed = any("FYERS PILLAR B PASS" in r for r in reasons)
+                        _vol_candle_ok = (candle_trigger in ["SHOOTING_STAR", "BEARISH_ENGULFING"] and vol_score > 1.2)
+                        if _vol_candle_ok or scalp_mode or _fy_pe_passed:
                             direction = "PE"
                             conf_msg = f"Bearish Flow ({vic_signal})"
-                            if vol_score > 1.5: conf_msg += f" + 📊 VOL SPIKE ({vol_score:.1f}x)"
-                            if candle_trigger: conf_msg += f" + ❄️ {candle_trigger}"
-                            reasons.append(f"✅ MASTER CONFLUENCE: {conf_msg} at Resistance {resistance}. Structure: {ms_trend}.")
+                            if vol_score > 1.5: conf_msg += f" + ≡ƒôè VOL SPIKE ({vol_score:.1f}x)"
+                            if candle_trigger: conf_msg += f" + Γ¥ä∩╕Å {candle_trigger}"
+                            if _fy_pe_passed and not _vol_candle_ok:
+                                conf_msg += " (FYERS-confirmed, vol/candle bypassed)"
+                            reasons.append(f"Γ£à MASTER CONFLUENCE: {conf_msg} at Resistance {resistance}. Structure: {ms_trend}.")
                         else:
                             reasons.append(f"[WAIT] TOPIC 6: Near Resistance, but waiting for Volume Participation (Score: {vol_score:.1f}) and Candle Trigger.")
                 else:
-                    reasons.append(f"❌ PILLAR 1 FAIL: Low Institutional Conviction (Score: {conviction_score:.1f}). Block PE.")
+                    reasons.append(f"Γ¥î PILLAR 1 FAIL: Low Institutional Conviction (Score: {conviction_score:.1f}). Block PE.")
             else:
                 reasons.append(f"[WAIT] GATE 1: Price near Resistance {resistance} but sustain not confirmed.")
 
@@ -750,10 +780,10 @@ class SignalEngine:
         if direction is None and pattern_cont in ["ASCENDING_TRIANGLE", "DESCENDING_TRIANGLE"] and abs(conviction_score) >= 7.0 and vol_score > 1.5:
              if pattern_cont == "ASCENDING_TRIANGLE" and conviction_score >= 7.0:
                  direction = "CE"
-                 reasons.append(f"✅ SIGNAL: High-Conviction TRIANGLE Breakout + VOLUME SPIKE (Score: {conviction_score:.1f}, Vol: {vol_score:.1f}x).")
+                 reasons.append(f"Γ£à SIGNAL: High-Conviction TRIANGLE Breakout + VOLUME SPIKE (Score: {conviction_score:.1f}, Vol: {vol_score:.1f}x).")
              elif pattern_cont == "DESCENDING_TRIANGLE" and conviction_score <= -7.0:
                  direction = "PE"
-                 reasons.append(f"✅ SIGNAL: High-Conviction TRIANGLE Breakout + VOLUME SPIKE (Score: {conviction_score:.1f}, Vol: {vol_score:.1f}x).")
+                 reasons.append(f"Γ£à SIGNAL: High-Conviction TRIANGLE Breakout + VOLUME SPIKE (Score: {conviction_score:.1f}, Vol: {vol_score:.1f}x).")
 
         # --- 3TF CONFLUENCE CHECK & CRB BYPASS ---
         enable_3tf = OPTIONS_CONFIG.get("configurableParameters", {}).get("enable_3tf_filters", False)
@@ -768,18 +798,18 @@ class SignalEngine:
             
             if direction == "CE" and not is_bullish:
                 if is_high_conviction_reversal:
-                    reasons.append(f"⚡ 3TF BYPASS ACTIVE: CE generated with non-aligned trends (4H={h4_trend}, 1H={h1_trend}, 15M={m15_trend}), but bypassed due to High-Conviction Reversal at Support (Candle={candle_trigger}, Vol={vol_score:.1f}x).")
+                    reasons.append(f"ΓÜí 3TF BYPASS ACTIVE: CE generated with non-aligned trends (4H={h4_trend}, 1H={h1_trend}, 15M={m15_trend}), but bypassed due to High-Conviction Reversal at Support (Candle={candle_trigger}, Vol={vol_score:.1f}x).")
                 else:
-                    reasons.append(f"❌ 3TF FILTER FAIL: CE signal generated but 3TF not aligned (4H={h4_trend}, 1H={h1_trend}, 15M={m15_trend}). Sitting on hands.")
+                    reasons.append(f"Γ¥î 3TF FILTER FAIL: CE signal generated but 3TF not aligned (4H={h4_trend}, 1H={h1_trend}, 15M={m15_trend}). Sitting on hands.")
                     direction = None
             elif direction == "PE" and not is_bearish:
                 if is_high_conviction_reversal:
-                    reasons.append(f"⚡ 3TF BYPASS ACTIVE: PE generated with non-aligned trends (4H={h4_trend}, 1H={h1_trend}, 15M={m15_trend}), but bypassed due to High-Conviction Reversal at Resistance (Candle={candle_trigger}, Vol={vol_score:.1f}x).")
+                    reasons.append(f"ΓÜí 3TF BYPASS ACTIVE: PE generated with non-aligned trends (4H={h4_trend}, 1H={h1_trend}, 15M={m15_trend}), but bypassed due to High-Conviction Reversal at Resistance (Candle={candle_trigger}, Vol={vol_score:.1f}x).")
                 else:
-                    reasons.append(f"❌ 3TF FILTER FAIL: PE signal generated but 3TF not aligned (4H={h4_trend}, 1H={h1_trend}, 15M={m15_trend}). Sitting on hands.")
+                    reasons.append(f"Γ¥î 3TF FILTER FAIL: PE signal generated but 3TF not aligned (4H={h4_trend}, 1H={h1_trend}, 15M={m15_trend}). Sitting on hands.")
                     direction = None
             else:
-                reasons.append(f"✅ 3TF CONFLUENCE PASS: 4H={h4_trend}, 1H={h1_trend}, 15M={m15_trend} aligned.")
+                reasons.append(f"Γ£à 3TF CONFLUENCE PASS: 4H={h4_trend}, 1H={h1_trend}, 15M={m15_trend} aligned.")
 
         # DTE Risk Classification
         dte_risk = "MODERATE"

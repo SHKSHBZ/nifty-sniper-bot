@@ -1,0 +1,258 @@
+{
+  "strategy": {
+    "name": "OI Flow Momentum Tracker",
+    "version": "1.0.0",
+    "description": "Simplified options buying strategy based on OI flow direction + spot trend. No S/R walls, no PCR thresholds, no FYERS quadrants, no VIC scores, no candle patterns. Just spot trend + OI delta + strike proximity.",
+    "created_date": "2026-06-11",
+    "based_on_analysis": "Deep dive analysis of June 11 NIFTY session — rally +213 pts then selloff -133 pts. CE OI collapsed 44% at lower strikes (writers covering), rolled to higher strikes (new shorts). PE OI exploded 22M contracts during rally (writers selling), panic-covered 21M during selloff. ITM strikes delivered 2-3x more ₹ than ATM/OTM despite lower % gains."
+  },
+
+  "data_architecture": {
+    "description": "Data collection is COMPLETELY separate from trading. The data_collector.py runs as an independent process via Windows Task Scheduler at 9:00 AM daily. It writes focus_zone and macro CSVs to logs/. The trading bot reads from these files — if the bot crashes, data keeps flowing. If the data collector crashes, the bot still trades with last-known data.",
+    "collector_script": "data_collector.py",
+    "scheduler_script": "install_data_collectors.ps1",
+    "outputs": {
+      "focus_zone": "logs/focus_zone_{nifty|sensex}_{YYYY-MM-DD}.csv",
+      "macro_snapshot": "logs/macro_{nifty|sensex}_{YYYY-MM-DD}.csv"
+    },
+    "startup_behavior": "If started before 09:15 IST, waits in 60-second sleep chunks until market open. If started mid-session, begins collecting immediately. If started post-market, waits until next trading day.",
+    "trading_bot_csv_writing": "DISABLED — project_config.json has focus_zone_writer: false. Only data_collector.py writes CSVs to avoid duplicates."
+  },
+
+  "entry_signal": {
+    "description": "Two conditions must BOTH be true. EMA gives direction, OI gives fuel. Without OI covering, spot can move but premiums won't expand (writers cap the upside). Without spot direction, OI covering alone is just noise.",
+    
+    "ema_crossover": {
+      "fast_period": 9,
+      "slow_period": 14,
+      "source": "spot_price_1min",
+      "cross_up_meaning": "Short-term momentum overtaking medium-term — spot accelerating upward",
+      "cross_down_meaning": "Short-term momentum falling below medium-term — spot losing steam, potentially reversing",
+      "candle_timeframe": "1 minute"
+    },
+
+    "oi_flow_confirmation": {
+      "description": "OI delta computed as 5-minute change in open interest across ATM ± 3 strikes (7 strikes total, same as original focus zone). Summed across all 7 strikes to get net flow direction.",
+      "lookback_minutes": 5,
+      "strike_zone": "ATM ± 3 strikes (7 total)",
+      "ce_oi_covering": "Sum of CE OI change across ATM±3 strikes is NEGATIVE (writers buying back calls = fuel for rally)",
+      "pe_oi_covering": "Sum of PE OI change across ATM±3 strikes is NEGATIVE (writers buying back puts = fuel for selloff)",
+      "ce_oi_building": "Sum of CE OI change is POSITIVE (writers selling new calls = resistance, caps CE upside)",
+      "pe_oi_building": "Sum of PE OI change is POSITIVE (writers selling new puts = resistance, caps PE upside)",
+      "flat_threshold": "OI change magnitude less than 50,000 contracts in 5 min = FLAT (no signal, don't enter)"
+    },
+
+    "combined_entry_rules": {
+      "buy_ce": "EMA 9 crosses ABOVE EMA 14 AND CE OI is COVERING (negative delta) across ATM±3 strikes",
+      "buy_pe": "EMA 9 crosses BELOW EMA 14 AND PE OI is COVERING (negative delta) across ATM±3 strikes",
+      "do_not_enter": [
+        "EMA crosses but OI is FLAT (no fuel — premium won't expand)",
+        "EMA crosses but OI is BUILDING in same direction (writers selling = headwind)",
+        "Spot is in decay phase (premiums bleeding >0.3 pts/min uniformly across strikes)",
+        "Within first 5 minutes of market open (09:15-09:20 — let the opening noise settle)",
+        "Within last 15 minutes of session (15:10-15:25 — gamma chaos on expiry, unpredictable)"
+      ]
+    }
+  },
+
+  "strike_selection": {
+    "description": "Buy 2-3 ITM strikes, NOT ATM or OTM. ITM has higher delta (0.5-0.7), higher absolute ₹ return per point of spot movement, and intrinsic value that provides a floor against theta decay. OTM gives better % gains but lower ₹. ATM has no intrinsic floor.",
+    "rule": "Pick strikes that are 100-200 points ITM relative to current spot.",
+    
+    "ce_example": {
+      "spot": 23173,
+      "selected_strikes": [23000, 23050, 23100],
+      "rationale": "Spot at 23,173. Strikes 23,000-23,100 are 73-173 pts ITM. CE 23000 has delta ~0.61 and intrinsic value of 173 pts. CE 23100 has delta ~0.52 and intrinsic value of 73 pts."
+    },
+    
+    "pe_example": {
+      "spot": 23231,
+      "selected_strikes": [23300, 23350, 23400],
+      "rationale": "Spot at 23,231. Strikes 23,300-23,400 are 69-169 pts ITM for puts. PE 23400 has highest delta and most intrinsic value."
+    },
+
+    "do_not_select": [
+      "ATM strike — no intrinsic floor, maximum theta bleed",
+      "OTM strikes — can go to zero on expiry, lowest ₹ return despite highest %",
+      "Strikes more than 250 pts from spot — too far, delta too low, not enough leverage"
+    ]
+  },
+
+  "position_sizing": {
+    "description": "Tiered allocation based on ITM depth. Deepest ITM (most intrinsic value, highest delta, least theta risk) gets the MOST capital. Shallower ITM (less intrinsic, more time value at risk) gets LESS.",
+    
+    "max_concurrent_positions": 3,
+    "max_concurrent_strikes_per_direction": 3,
+    "one_direction_at_a_time": true,
+    "allow_ce_and_pe_simultaneously": false,
+    
+    "allocation_example": {
+      "total_capital_per_trade": "Rs.30,000",
+      "ce_23000": "Rs.15,000 (50%) — deepest ITM, delta 0.61, 173 pts intrinsic floor",
+      "ce_23050": "Rs.10,000 (33%) — mid ITM, delta 0.57, 123 pts intrinsic floor",
+      "ce_23100": "Rs.5,000  (17%) — shallow ITM, delta 0.52, 73 pts intrinsic floor"
+    },
+
+    "why_tiered": "If spot reverses 100 pts, CE 23100 loses the most % (no intrinsic floor left). CE 23000 still has 73 pts of intrinsic value protecting it. Your biggest bet is on the strike least likely to go to zero."
+  },
+
+  "exit_rules": {
+    "description": "Exit is signal-based, not P&L-based. Don't use fixed ₹ targets. Exit when the REASON you entered no longer exists.",
+
+    "exit_ce_when": [
+      "CE OI covering STOPS for 10+ consecutive minutes (writers done covering = fuel exhausted). This is the PRIMARY exit signal.",
+      "EMA 9 crosses back BELOW EMA 14 (spot direction reversed)",
+      "Spot drops 50+ points from entry AND continues dropping 3+ consecutive 1-min candles",
+      "It is 14:45 or later on expiry day (last 30 min = gamma chaos, unpredictable)",
+      "PE OI starts covering aggressively at ATM±3 strikes (market is flipping — prepare to switch sides)"
+    ],
+
+    "exit_pe_when": [
+      "PE OI covering STOPS for 10+ consecutive minutes (primary exit signal)",
+      "EMA 9 crosses back ABOVE EMA 14",
+      "Spot rises 50+ points from entry AND continues rising 3+ consecutive 1-min candles",
+      "14:45+ on expiry day",
+      "CE OI starts covering aggressively"
+    ],
+
+    "do_not_exit_on": [
+      "Small premium dips (<10%) while OI is still covering — this is noise, not signal",
+      "Spot moving sideways while OI still confirming — trend may resume",
+      "Fixed ₹ stop loss — the signal (OI flow) is your stop loss, not an arbitrary number"
+    ],
+
+    "partial_exits": {
+      "enabled": true,
+      "when": "OI covering ACCELERATES (5-min OI change >3x the average of last 30 min)",
+      "action": "Book 50-70% of position. Let remainder run with breakeven SL.",
+      "rationale": "Accelerating covering = panic phase. Writers are capitulating. This is peak premium. Take profits here. If trend continues, the remaining 30-50% captures it with zero risk."
+    }
+  },
+
+  "direction_switch": {
+    "description": "The gap between CE exit and PE entry (or vice versa) is NOT dead time. It's the decay bridge. Don't immediately flip — wait for confirmation.",
+    
+    "ce_to_pe_flow": [
+      "1. CE exit triggered (OI covering stops or EMA crosses down)",
+      "2. WAIT — observe decay phase. Premiums bleed ~0.3-0.6 pts/min across all strikes",
+      "3. Decay stabilizes — premiums stop bleeding uniformly",
+      "4. PE OI starts covering at ATM±3 strikes",
+      "5. EMA 9 crosses below EMA 14 — CONFIRMED",
+      "6. ENTER PE at 2-3 ITM strikes"
+    ],
+
+    "pe_to_ce_flow": [
+      "1. PE exit triggered",
+      "2. WAIT — observe decay",
+      "3. Decay stabilizes",
+      "4. CE OI starts covering at ATM±3 strikes",
+      "5. EMA 9 crosses above EMA 14 — CONFIRMED",
+      "6. ENTER CE at 2-3 ITM strikes"
+    ],
+
+    "minimum_wait_between_trades_minutes": 15,
+    "reason": "Emotional and mechanical. Gives the market time to confirm the new direction. Prevents whipsaw entries."
+  },
+
+  "decay_management": {
+    "description": "Theta decay is mechanical math — premiums trend toward 0 for OTM, toward intrinsic for ITM. Don't fight it. Use it as a timing signal.",
+    
+    "during_rally_holding_ce": "ITM CE decays slower in % because intrinsic value provides a floor. Shallow ITM decays faster than deep ITM. If OI is still covering, hold through moderate decay.",
+    
+    "during_selloff_holding_pe": "Same principle — deep ITM PE most protected.",
+
+    "during_flat_market": "Both CE and PE decay. This is the WORST time to hold any position. If OI is flat (not covering on either side), EXIT. Don't bleed theta waiting for nothing.",
+
+    "decay_detection": "If premiums across ALL ATM±3 strikes are dropping >0.3 pts/min uniformly for 15+ minutes AND OI is flat on both sides, the market is in decay mode. EXIT all positions.",
+
+    "straddle_shift_tracking": {
+      "description": "As spot moves, ATM migrates. Writers shift their positions accordingly. Track this migration — it tells you where the next resistance/support will form.",
+      "ce_rally_example": "ATM moved 23,113 -> 23,202 -> 23,239 -> 23,310 during rally. CE writers covered at old ATM (23,100-23,150) and re-sold at new ATM (23,250-23,300). The new shorts at 23,250 became resistance during the selloff — spot never broke below it until 14:40.",
+      "pe_selloff_example": "ATM moved 23,310 -> 23,231 -> 23,141 during selloff. PE writers who sold puts at 23,200-23,300 during the rally panic-covered during the selloff. The covering volume at 23,200 was the highest — that's where the gamma squeeze was most intense."
+    }
+  },
+
+  "prior_day_premium_levels": {
+    "description": "Premiums have memory. Prior day's high and low act as support/resistance for today's premium. Use this for entry timing and take-profit zones.",
+    "usage": "Before entering, check: is current premium near the prior 1-2 day LOW (within 15%)? If yes, support likely holds — good entry. If premium is near prior day HIGH, resistance likely — wait for pullback or enter with reduced size.",
+    "example_ce_23100": "June 9 range: 58-177. June 11 entry at 164 was 7% below prior day high (177). Prior resistance became support. Premium bounced exactly there.",
+    "note": "This feature is PLANNED but NOT yet implemented in v1.0. The data_collector.py now captures data every day, so prior-day analysis will become available as data accumulates."
+  },
+
+  "risk_management": {
+    "max_positions_per_day": 4,
+    "max_concurrent_positions": 3,
+    "max_daily_loss": "Rs.8,000",
+    "position_sl_rule": "Signal-based, not price-based. Exit when OI covering stops — not when premium drops X%.",
+    "drawdown_breaker": "If daily P&L reaches -Rs.8,000, halt all new entries for the day. Existing positions are still monitored and exited based on OI signals."
+  },
+
+  "what_we_removed_from_old_bot": {
+    "description": "These gates were blocking trades without adding value. All removed.",
+    "gates_removed": [
+      "FYERS PILLAR A (CE volume momentum) — OI flow already contains this information",
+      "FYERS PILLAR B (LONG/SHORT BUILDUP quadrant) — 15-min lookback too slow, 5-min better but still redundant",
+      "FYERS PILLAR C (S/R migration) — S/R walls irrelevant on momentum days",
+      "VIC Conviction Score — -10.0 all day blocking every signal. OI delta is the real conviction",
+      "Market Structure (HH/HL trend) — misclassified range days as DOWNTREND, blocking CE",
+      "Volume + Candle Trigger — requires vol_score>1.2 + specific candle patterns. Blocked 80% of signals",
+      "3TF Filter (4H/1H/15M EMA) — prior day trend poisoning intraday signals",
+      "Focus PCR thresholds — PCR bounced 0.87-1.98. No predictive value for premium direction",
+      "S/R Wall Proximity (0.25%) — spot spent 90% of June 11 outside this zone. Missed all momentum"
+    ]
+  },
+
+  "dashboard_config": {
+    "active_bots": ["NIFTY", "SENSEX", "NIFTY_SELLER"],
+    "data_collectors": ["NIFTY_DATA", "SENSEX_DATA"],
+    "retired_bots": ["NIFTY_REGIME", "SENSEX_REGIME", "NIFTY_T1", "NIFTY_T2"],
+    "retired_bots_status": "Hidden from dashboard. Blocked from launch. Portfolio files preserved.",
+    "data_collector_ui": "Separate 'DATA DOWNLOAD' section below bot controls. Cyan-colored. Shows COLLECTING/STOPPED with PID."
+  },
+
+  "june_11_session_proof": {
+    "description": "All concepts validated against actual June 11 full-day data (09:15-15:29, 6,690 focus zone rows).",
+    
+    "spot_trajectory": "23,113 -> 23,097 (shakeout) -> 23,310 (rally peak 12:35) -> 23,177 (close). +213 pts up, -133 pts down.",
+    
+    "ce_trade": {
+      "entry": "10:05, CE 23000+23050+23100, spot=23,105, OI covering -2,603K at 23100",
+      "exit": "11:55, OI covering stopped, CE OI flat",
+      "pnl": "Rs.22,363 (3 ITM strikes, 1 lot each)",
+      "max_single_strike": "CE 23100: 164 -> 270 (+64.9%, Rs.6,906)"
+    },
+    
+    "pe_trade": {
+      "entry": "14:30, PE 23300+23350+23400, spot=23,231, PE OI covering -587K at 23200",
+      "exit": "15:05, OI covering accelerating (panic phase)",
+      "pnl": "Rs.12,597 (3 ITM strikes, 1 lot each)",
+      "max_single_strike": "PE 23400: 233 -> 304 (+30.2%, Rs.4,582)"
+    },
+    
+    "combined_pnl": "Rs.34,960 in 2 trades, 6 lots total",
+    
+    "oi_roll_proof": {
+      "ce_writers_covered": "CE OI at 23000-23150 dropped 28-49% (covering losing shorts)",
+      "ce_writers_rolled_to": "CE OI at 23250 grew +8% (new shorts at higher strike)",
+      "pe_writers_sold": "PE OI across ALL strikes grew 20-155% during rally (22M contracts)",
+      "pe_writers_panicked": "PE OI across ALL strikes dropped 22-55% during selloff (21M covered)"
+    },
+    
+    "chain_correlation": "CE premium changes across strikes 23000-23350 correlated 0.98-0.99 during rally. OI movement at any strike affects premiums across entire chain.",
+
+    "old_bot_would_have_done": "0 trades. Crashed at 09:02 with UnboundLocalError from v3.6 bug. Even without crash, 7 gates would have blocked all entries."
+  },
+
+  "pending_enhancements": {
+    "prior_day_support_resistance": "Use historical premium levels for entry timing. Requires 2+ days of data_collector.py output to accumulate. Plan: store daily OHLC for each strike in a summary file.",
+    "ema_crossover_backtest": "Run full backtest of EMA 9/14 + OI filter across all available historical data to quantify win rate, avg return, max drawdown.",
+    "multi_timeframe_oi": "Track OI delta at 5-min, 15-min, and 60-min windows. Divergence between timeframes (e.g., 5-min covering but 60-min still building) can signal trend strength or exhaustion.",
+    "auto_strike_selection": "Algorithm to automatically pick the optimal 2-3 ITM strikes based on delta, intrinsic value, and liquidity instead of fixed offset from spot."
+  },
+
+  "_notes": {
+    "this_is_a_spec_not_code": "This JSON describes the strategy logic. Implementation requires a new engine (separate from signal_engine.py). The existing SignalEngine v3.6 with 7-gate fixes is preserved as legacy. The new OI-flow engine should be a separate module.",
+    "keep_it_simple": "Two inputs: EMA direction + OI delta. Two outputs: BUY or WAIT. The June 11 analysis proved that over-engineering cost real money.",
+    "data_first": "Without data_collector.py running, prior-day analysis and backtesting are impossible. Always start the data collectors first."
+  }
+}

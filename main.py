@@ -274,12 +274,17 @@ class LiveOrchestrator:
                 # ── OI-Flow mode (v1.1) ───────────────────────────
                 # Minimal engine: spot trend + OI velocity only.
                 if self.engine_mode == "oi_flow":
+                    if self.portfolio.get("open_straddle"):
+                        self._monitor_straddle(now)
                     self._run_oi_flow_tick(now)
-                    if self.engine.position is not None:
+                    
+                    is_expiry = (self.fetcher.get_expiry_date() == now.date().isoformat())
+                    if self.engine.position is not None or self.portfolio.get("open_straddle"):
                         time.sleep(3)
+                    elif is_expiry:
+                        time.sleep(5)   # 5-second hyper-fast engine processing on Expiry Day
                     else:
-                        sleep_secs = 60 - datetime.now(IST).second
-                        time.sleep(max(1, sleep_secs))
+                        time.sleep(15)  # 15-second processing on Normal Days
                     continue
 
                 # ── Seller mode (iron condor only) ────────────────────
@@ -688,6 +693,28 @@ class LiveOrchestrator:
         if spot <= 0:
             return
 
+        # === EXACT 14:55 EXPIRY LONG STRADDLE LOGIC (Writer Exit Volatility) ===
+        now_dt = now.date()
+        is_expiry = (self.fetcher.get_expiry_date() == now_dt.isoformat())
+        if is_expiry and dtime(14, 55) <= now.time() < dtime(14, 56):
+            if not self.portfolio.get("open_straddle") and self.portfolio.get("straddle_executed_today") != now_dt.isoformat():
+                logger.info(f"dYY [EXPIRY STRADDLE] 14:55 PM Trigger Activated! Spot: {spot:.1f}")
+                signal = {
+                    "direction": "CE",
+                    "reason": ["14:55_EXPIRY_STRADDLE"],
+                    "is_straddle": True,
+                    "strike_offset": 0,
+                    "second_strike_offset": 0,
+                    "combined_sl_pct": 0.50,
+                    "tactic_tp_pct": 1.0,
+                    "tactic_time_stop_min": 10,  # 10 minute hold to catch the 3:00 PM candle
+                    "tactic_name": "expiry_straddle"
+                }
+                self._open_straddle_position(signal, now, spot)
+                if self.portfolio.get("open_straddle"):
+                    self.portfolio["straddle_executed_today"] = now_dt.isoformat()
+                    self.save_portfolio()
+
         # Ensure strikes are locked before building OI snapshot
         if not self.engine._strikes_locked:
             self.engine.lock_strikes(spot)
@@ -701,7 +728,11 @@ class LiveOrchestrator:
         premiums = {}
         try:
             ltp_map = self.fetcher.get_ltp_map()
-            all_strikes = self.engine.ce_fixed_strikes + self.engine.pe_fixed_strikes
+            # Track LIVE ATM strikes on every tick instead of locking old 09:20 strikes
+            atm_strike = round(spot / self.engine.strike_step) * self.engine.strike_step
+            live_ce = [atm_strike, atm_strike + self.engine.strike_step, atm_strike + 2 * self.engine.strike_step]
+            live_pe = [atm_strike, atm_strike - self.engine.strike_step, atm_strike - 2 * self.engine.strike_step]
+            all_strikes = live_ce + live_pe
             for s in all_strikes:
                 s_int = int(s)
                 ce_oi = self._get_option_oi(s_int, "CE")
@@ -710,6 +741,13 @@ class LiveOrchestrator:
                 # Always feed premiums for BOTH CE and PE with string keys
                 premiums[f"{s_int}_CE"] = ltp_map.get(f"{s_int}_CE", 0)
                 premiums[f"{s_int}_PE"] = ltp_map.get(f"{s_int}_PE", 0)
+
+            # Ensure currently open position's dynamic strikes are always populated in the premiums map
+            if self.engine.position:
+                direction = self.engine.position["direction"]
+                for s in self.engine.position["strikes"]:
+                    s_int = int(s)
+                    premiums[f"{s_int}_{direction}"] = ltp_map.get(f"{s_int}_{direction}", 0)
 
             # IC position premiums (if active)
             if getattr(self.engine, 'ic_position', None):
@@ -789,6 +827,26 @@ class LiveOrchestrator:
         self.portfolio.setdefault("open_positions", []).append(new_pos)
         self.save_portfolio()
 
+        # Journal: record entry
+        if self.journal is not None and self._journal_day_started:
+            try:
+                for strike, strike_lots in lots.items():
+                    self.journal.on_entry(
+                        tactic="oi_flow",
+                        direction=direction,
+                        strike=int(strike),
+                        entry_ts=now,
+                        entry_premium=real_premiums[int(strike)],
+                        qty_lots=int(strike_lots),
+                        sl_pct=0.25,
+                        tp_pct=0.50,
+                        time_stop_min=30,
+                        regime_at_entry="trending",
+                        entry_state={"spot": float(spot)}
+                    )
+            except Exception as e:
+                logger.warning(f"Journal on_entry for OI-Flow failed: {e}")
+
         total_lots = sum(lots.values())
         logger.info(f"[OI-Flow] ENTRY: {direction} | Strikes={strikes} "
                     f"| Premiums={real_premiums} | Lots={lots} | Spot={spot:.0f}")
@@ -833,6 +891,20 @@ class LiveOrchestrator:
                 })
                 break
         self.save_portfolio()
+
+        # Journal: record exit
+        if self.journal is not None and self._journal_day_started:
+            try:
+                for strike, pnl in result.get("pnl_per_strike", {}).items():
+                    self.journal.on_exit(
+                        tactic="oi_flow",
+                        exit_ts=now,
+                        exit_premium=exit_premiums.get(int(strike), 0.0),
+                        exit_reason=reason,
+                        net_pnl=pnl
+                    )
+            except Exception as e:
+                logger.warning(f"Journal on_exit for OI-Flow failed: {e}")
 
         logger.info(f"[OI-Flow] EXIT: {direction} | Reason={reason} "
                     f"| P&L=Rs.{result['total_pnl']:+.0f} | "
@@ -1844,15 +1916,15 @@ class LiveOrchestrator:
         exit_time = datetime.now(IST)
         # Append two trade_history entries (one per leg) for compatibility
         # with the dashboard TradesTable + downstream P&L calc.
-        for leg_dir, leg_entry, leg_exit, leg_pnl in (
-            (ce_dir, sd["leg1_entry_price"], leg1_exit, leg1_pnl),
-            (pe_dir, sd["leg2_entry_price"], leg2_exit, leg2_pnl),
+        for leg_dir, leg_entry, leg_exit, leg_pnl, leg_strike in (
+            (ce_dir, sd["leg1_entry_price"], leg1_exit, leg1_pnl, leg1_strike),
+            (pe_dir, sd["leg2_entry_price"], leg2_exit, leg2_pnl, leg2_strike),
         ):
             self.portfolio["trade_history"].append({
                 "entry_time": sd["entry_time"],
                 "exit_time": exit_time.isoformat(),
                 "trade_type": f"BUY {leg_dir} (T2 leg)",
-                "strike": strike,
+                "strike": leg_strike,
                 "entry_price": leg_entry,
                 "exit_price": leg_exit,
                 "pnl": leg_pnl - 60.0,   # half the brokerage allocated per leg

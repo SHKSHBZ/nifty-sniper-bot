@@ -65,6 +65,7 @@ class OrderResult:
     target_price: float
     dry_run: bool
     message: str
+    transaction_type: str = "BUY"
     raw_response: dict = field(default_factory=dict)
 
 
@@ -107,6 +108,7 @@ class OrderExecutor:
         option_type: Literal["CE", "PE"],
         expiry: str,       # "YYYY-MM-DD"
         quantity: int,
+        transaction_type: Literal["BUY", "SELL"] = "BUY",
         dry_run: bool = True,
         ltp_override: Optional[float] = None,
     ) -> OrderResult:
@@ -114,13 +116,14 @@ class OrderExecutor:
         Place a LIMIT option order with automatic SL/target calculation.
 
         Args:
-            symbol:       "NIFTY" or "SENSEX"
-            strike:       Strike price (must be valid multiple)
-            option_type:  "CE" or "PE"
-            expiry:       Expiry date string "YYYY-MM-DD"
-            quantity:     Number of units (not lots)
-            dry_run:      If True, simulates without hitting the API
-            ltp_override: Use this LTP instead of live feed (for testing)
+            symbol:           "NIFTY" or "SENSEX"
+            strike:           Strike price (must be valid multiple)
+            option_type:      "CE" or "PE"
+            expiry:           Expiry date string "YYYY-MM-DD"
+            quantity:         Number of units (not lots)
+            transaction_type: "BUY" or "SELL"
+            dry_run:          If True, simulates without hitting the API
+            ltp_override:     Use this LTP instead of live feed (for testing)
         """
         # --- Pre-flight checks ---
         self._validate_strike(symbol, strike)
@@ -141,22 +144,28 @@ class OrderExecutor:
                 option_type=option_type, quantity=quantity,
                 limit_price=0, sl_price=0, target_price=0,
                 dry_run=dry_run,
-                message="Could not fetch LTP — order aborted."
+                message="Could not fetch LTP — order aborted.",
+                transaction_type=transaction_type,
             )
 
-        limit_price = round(ltp * (1 + LIMIT_BUFFER_PCT), 1)
-        sl_price = round(ltp * (1 - SL_PCT), 1)
-        target_price = round(ltp * (1 + TARGET_PCT), 1)
+        if transaction_type.upper() == "SELL":
+            limit_price = round(ltp * (1 - LIMIT_BUFFER_PCT), 1)
+            sl_price = round(ltp * (1 + SL_PCT), 1)
+            target_price = round(ltp * (1 - TARGET_PCT), 1)
+        else:
+            limit_price = round(ltp * (1 + LIMIT_BUFFER_PCT), 1)
+            sl_price = round(ltp * (1 - SL_PCT), 1)
+            target_price = round(ltp * (1 + TARGET_PCT), 1)
 
         logger.info(
-            "[%s] %s %d%s | LTP=%.2f | Limit=%.2f | SL=%.2f | Target=%.2f | DryRun=%s",
-            symbol, option_type, strike, expiry, ltp,
+            "[%s] %s %s %d%s | LTP=%.2f | Limit=%.2f | SL=%.2f | Target=%.2f | DryRun=%s",
+            transaction_type, symbol, option_type, strike, expiry, ltp,
             limit_price, sl_price, target_price, dry_run
         )
 
         if dry_run:
             return self._dry_run_result(
-                instrument_key, strike, option_type, quantity, limit_price, sl_price, target_price
+                instrument_key, strike, option_type, quantity, limit_price, sl_price, target_price, transaction_type
             )
 
         # --- Place real order ---
@@ -168,7 +177,67 @@ class OrderExecutor:
             limit_price=limit_price,
             sl_price=sl_price,
             target_price=target_price,
+            transaction_type=transaction_type,
         )
+
+    def place_short_option_order(
+        self,
+        symbol: str,
+        strike: int,
+        option_type: Literal["CE", "PE"],
+        expiry: str,
+        quantity: int,
+        dry_run: bool = True,
+        ltp_override: Optional[float] = None,
+    ) -> OrderResult:
+        """Helper to place a short (SELL) option order."""
+        return self.place_option_order(
+            symbol=symbol,
+            strike=strike,
+            option_type=option_type,
+            expiry=expiry,
+            quantity=quantity,
+            transaction_type="SELL",
+            dry_run=dry_run,
+            ltp_override=ltp_override,
+        )
+
+    def place_multi_leg_short_order(
+        self,
+        symbol: str,
+        ce_strike: int,
+        pe_strike: int,
+        expiry: str,
+        quantity: int,
+        dry_run: bool = True,
+        ltp_override_ce: Optional[float] = None,
+        ltp_override_pe: Optional[float] = None,
+    ) -> dict[str, OrderResult]:
+        """
+        Executes multi-leg short strategy (CE + PE) atomically/sequentially.
+        Returns dict containing results for 'ce' and 'pe' legs.
+        """
+        ce_res = self.place_option_order(
+            symbol=symbol,
+            strike=ce_strike,
+            option_type="CE",
+            expiry=expiry,
+            quantity=quantity,
+            transaction_type="SELL",
+            dry_run=dry_run,
+            ltp_override=ltp_override_ce,
+        )
+        pe_res = self.place_option_order(
+            symbol=symbol,
+            strike=pe_strike,
+            option_type="PE",
+            expiry=expiry,
+            quantity=quantity,
+            transaction_type="SELL",
+            dry_run=dry_run,
+            ltp_override=ltp_override_pe,
+        )
+        return {"ce": ce_res, "pe": pe_res}
 
     def get_open_positions(self) -> list[dict]:
         """Fetch current open positions from Upstox."""
@@ -198,7 +267,10 @@ class OrderExecutor:
     # ------------------------------------------------------------------
 
     def _validate_strike(self, symbol: str, strike: int):
-        from strike_selector import STRIKE_STEPS
+        try:
+            from strike_selector import STRIKE_STEPS
+        except ImportError:
+            STRIKE_STEPS = {"NIFTY": 50, "BANKNIFTY": 100, "SENSEX": 100, "FINNIFTY": 50}
         step = STRIKE_STEPS.get(symbol.upper(), 50)
         if strike % step != 0:
             raise ValueError(
@@ -247,9 +319,10 @@ class OrderExecutor:
         return f"{exchange}|{symbol.upper()}{exp_str}{strike}{option_type}"
 
     def _dry_run_result(
-        self, instrument_key, strike, option_type, quantity, limit_price, sl_price, target_price
+        self, instrument_key, strike, option_type, quantity, limit_price, sl_price, target_price, transaction_type: str = "BUY"
     ) -> OrderResult:
         logger.info("DRY RUN — order NOT sent to exchange.")
+        verb = "sell" if transaction_type.upper() == "SELL" else "buy"
         return OrderResult(
             success=True,
             order_id="DRY_RUN_" + str(int(time.time())),
@@ -261,14 +334,15 @@ class OrderExecutor:
             sl_price=sl_price,
             target_price=target_price,
             dry_run=True,
+            transaction_type=transaction_type.upper(),
             message=(
-                f"[DRY RUN] Would buy {quantity} × {instrument_key} "
+                f"[DRY RUN] Would {verb} {quantity} × {instrument_key} "
                 f"@ Rs. {limit_price} | SL: Rs. {sl_price} | Target: Rs. {target_price}"
             ),
         )
 
     def _send_order(
-        self, instrument_key, strike, option_type, quantity, limit_price, sl_price, target_price
+        self, instrument_key, strike, option_type, quantity, limit_price, sl_price, target_price, transaction_type: str = "BUY"
     ) -> OrderResult:
         payload = {
             "quantity": quantity,
@@ -278,7 +352,7 @@ class OrderExecutor:
             "tag": "nifty-bot",
             "instrument_token": instrument_key,
             "order_type": "LIMIT",
-            "transaction_type": "BUY",
+            "transaction_type": transaction_type.upper(),
             "disclosed_quantity": 0,
             "trigger_price": 0,
             "is_amo": False,
@@ -296,7 +370,7 @@ class OrderExecutor:
             self._trade_log.append({
                 "order_id": order_id, "instrument": instrument_key,
                 "limit_price": limit_price, "sl_price": sl_price,
-                "target_price": target_price, "timestamp": time.time()
+                "target_price": target_price, "transaction_type": transaction_type.upper(), "timestamp": time.time()
             })
             logger.info("Order placed successfully. Order ID: %s", order_id)
             return OrderResult(
@@ -305,6 +379,7 @@ class OrderExecutor:
                 option_type=option_type, quantity=quantity,
                 limit_price=limit_price, sl_price=sl_price,
                 target_price=target_price, dry_run=False,
+                transaction_type=transaction_type.upper(),
                 message=f"Order placed: {order_id}",
                 raw_response=data,
             )
@@ -316,6 +391,7 @@ class OrderExecutor:
                 option_type=option_type, quantity=quantity,
                 limit_price=limit_price, sl_price=sl_price,
                 target_price=target_price, dry_run=False,
+                transaction_type=transaction_type.upper(),
                 message=f"Order FAILED: {exc.response.text}",
             )
 

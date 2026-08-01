@@ -29,6 +29,15 @@ from tactics.trend_pullback import TrendPullbackTactic
 from tactics.bullish_orb import BullishORBTactic
 from tactics.bearish_orb import BearishORBTactic
 from tactics.ief import IEFTactic, IEFConfig, IEFAnalyzer
+from tactics.seller_tactics import (
+    ShortStraddleTactic,
+    ShortStraddleConfig,
+    ShortStrangleTactic,
+    ShortStrangleConfig,
+    get_atm_strike,
+    get_straddle_strikes,
+    get_strangle_strikes,
+)
 
 __all__ = [
     "TacticState",
@@ -42,4 +51,11 @@ __all__ = [
     "IEFTactic",
     "IEFConfig",
     "IEFAnalyzer",
+    "ShortStraddleTactic",
+    "ShortStraddleConfig",
+    "ShortStrangleTactic",
+    "ShortStrangleConfig",
+    "get_atm_strike",
+    "get_straddle_strikes",
+    "get_strangle_strikes",
 ]

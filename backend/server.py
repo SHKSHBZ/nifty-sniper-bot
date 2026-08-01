@@ -47,16 +47,14 @@ LOG_DIR = BASE_DIR / "logs"
 SESSION_FILE = BASE_DIR / "state" / "upstox_session.json"
 
 # --- Process Tracking ---
-# Consolidated 2-bot view (2026-05-17): regime-mode bots only. The dispatcher
-# in regime mode already runs all tactics (T1 / T2 / trend_pullback / vwap /
-# ORBs) — the previous T1/T2/legacy variants were running duplicate trades.
-# Legacy/T1/T2 variants kept as lab-only labels for backward compat with the
-# dashboard, but are not in the active set.
-ACTIVE_BOT_TYPES = ["NIFTY_REGIME", "SENSEX_REGIME", "NIFTY_SELLER"]
-# Lab-only labels still readable (so dashboard can show historical portfolios)
-LAB_BOT_TYPES = ["NIFTY", "SENSEX", "NIFTY_T1", "NIFTY_T2"]
+# PriceActionBot v4.0 (2026-06-03): NIFTY & SENSEX now run PriceActionBot
+# instead of legacy OI-Wall MR. Unblocked from lab so they can be launched.
+ACTIVE_BOT_TYPES = ["NIFTY", "SENSEX", "NIFTY_SELLER"]
+LAB_BOT_TYPES = ["NIFTY_REGIME", "SENSEX_REGIME", "NIFTY_T1", "NIFTY_T2"]
 BOT_TYPES = ACTIVE_BOT_TYPES + LAB_BOT_TYPES
+DATA_COLLECTORS = ["NIFTY_DATA", "SENSEX_DATA"]
 tracked_pids = {b: None for b in BOT_TYPES}
+tracked_dc_pids = {d: None for d in DATA_COLLECTORS}
 
 
 def _suffix(bot_type: str) -> str:
@@ -91,7 +89,7 @@ def _missed_today_file(bot_type: str) -> Path:
 
 
 def _portfolio_file(bot_type: str) -> tuple[Path, float]:
-    return BASE_DIR / "data" / f"paper_portfolio_{_suffix(bot_type)}.json", 100000.0
+    return BASE_DIR / "data" / f"paper_portfolio_{_suffix(bot_type)}.json", 600000.0
 
 
 def _safe_load_json(path: Path, default):
@@ -135,14 +133,34 @@ def find_running_bots():
     return found
 
 
+def find_running_data_collectors():
+    """Scan for running data_collector.py processes. Returns map of
+    collector_name -> pid."""
+    found = {d: None for d in DATA_COLLECTORS}
+    for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
+        try:
+            cmdline = proc.info.get('cmdline') or []
+            cmd_str = " ".join(cmdline).lower()
+            if 'data_collector.py' not in cmd_str:
+                continue
+            # Check for SENSEX first (more specific), then NIFTY
+            if 'sensex' in cmd_str:
+                found["SENSEX_DATA"] = proc.pid
+            elif 'nifty' in cmd_str:
+                found["NIFTY_DATA"] = proc.pid
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+    return found
+
+
 # --- Status ---
 @app.get("/status")
 def get_status():
     discovered = find_running_bots()
+    discovered_dc = find_running_data_collectors()
     result = []
     for name in BOT_TYPES:
         pid = discovered.get(name) or tracked_pids.get(name)
-        # Verify pid is still alive
         if pid:
             try:
                 p = psutil.Process(pid)
@@ -154,6 +172,22 @@ def get_status():
                 pass
         tracked_pids[name] = None
         result.append({"name": name, "status": "stopped", "pid": None})
+
+    # Add data collector status
+    for dc_name in DATA_COLLECTORS:
+        pid = discovered_dc.get(dc_name) or tracked_dc_pids.get(dc_name)
+        if pid:
+            try:
+                p = psutil.Process(pid)
+                if p.is_running() and p.status() != psutil.STATUS_ZOMBIE:
+                    result.append({"name": dc_name, "status": "running", "pid": pid})
+                    tracked_dc_pids[dc_name] = pid
+                    continue
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+        tracked_dc_pids[dc_name] = None
+        result.append({"name": dc_name, "status": "stopped", "pid": None})
+
     return result
 
 
@@ -233,6 +267,64 @@ def stop_bot(bot_type: str):
 
     tracked_pids[bot_type] = None
     return {"message": f"{bot_type} stopped"}
+
+
+# --- Data Collector Start / Stop ---
+@app.post("/data-collector/start/{index_name}")
+def start_data_collector(index_name: str):
+    index_name = index_name.upper()
+    if index_name not in ("NIFTY", "SENSEX"):
+        raise HTTPException(400, "Invalid index. Use NIFTY or SENSEX.")
+
+    dc_name = f"{index_name}_DATA"
+    discovered = find_running_data_collectors()
+    if discovered.get(dc_name):
+        tracked_dc_pids[dc_name] = discovered[dc_name]
+        return {"message": f"{dc_name} already running", "pid": discovered[dc_name]}
+
+    cmd = [sys.executable, "-u", str(BASE_DIR / "data_collector.py"), index_name]
+
+    LOG_DIR.mkdir(exist_ok=True)
+    try:
+        proc = subprocess.Popen(
+            cmd, cwd=str(BASE_DIR),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == 'nt' else 0
+        )
+        tracked_dc_pids[dc_name] = proc.pid
+        return {
+            "message": f"Data collector {dc_name} started",
+            "pid": proc.pid,
+        }
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
+@app.post("/data-collector/stop/{index_name}")
+def stop_data_collector(index_name: str):
+    index_name = index_name.upper()
+    if index_name not in ("NIFTY", "SENSEX"):
+        raise HTTPException(400, "Invalid index. Use NIFTY or SENSEX.")
+
+    dc_name = f"{index_name}_DATA"
+    discovered = find_running_data_collectors()
+    pid = discovered.get(dc_name) or tracked_dc_pids.get(dc_name)
+
+    if not pid:
+        return {"message": f"{dc_name} is not running"}
+
+    try:
+        parent = psutil.Process(pid)
+        for child in parent.children(recursive=True):
+            child.kill()
+        parent.kill()
+    except Exception:
+        pass
+
+    tracked_dc_pids[dc_name] = None
+    return {"message": f"{dc_name} stopped"}
 
 
 # --- Stats ---

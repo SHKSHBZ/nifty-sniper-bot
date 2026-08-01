@@ -1,0 +1,126 @@
+{
+  "backtest_date": "2026-06-03",
+  "strategy": "PriceActionBot — Hybrid HTF (Production Schema)",
+  "description": "HTF confirms -> full size | HTF neutral -> half size | HTF opposes -> skip",
+
+  "config": {
+    "symbol": "NIFTY",
+    "timeframe_entry": "5min",
+    "timeframe_htf": "15min",
+    "htf_mode": "hybrid_scored",
+    "size_when_htf_confirm": 1.0,
+    "size_when_htf_neutral": 0.5,
+    "size_when_htf_oppose": 0.0,
+    "base_lots": 5,
+    "lot_size": 75,
+    "cooldown_candles": 2,
+    "max_trades_per_day": 6,
+    "max_daily_loss": 8000,
+    "rejection_close_pct": 0.5,
+    "retest_buffer_pct": 0.002,
+    "no_entry_after": "14:30",
+    "sl_tiers": {
+      "premium_100_plus": 0.12,
+      "premium_70_100": 0.15,
+      "premium_40_70": 0.20,
+      "premium_below_40": 0.25
+    },
+    "exit_rules": ["SL hit", "EOD force close at 15:25"],
+    "strike_selection": "1-strike ITM from ATM"
+  },
+
+  "summary": {
+    "total_pnl": 126287,
+    "total_trades": 19,
+    "wins": 12,
+    "losses": 7,
+    "win_rate_pct": 63.16,
+    "days_with_trades": 6,
+    "days_blocked_by_loss": 1,
+    "trades_full_size": 9,
+    "trades_half_size": 10,
+    "ce_pnl": 8937,
+    "pe_pnl": 117350
+  },
+
+  "three_way_comparison": {
+    "without_htf": { "pnl": 164239, "trades": 19, "win_rate_pct": 63.16, "max_loss_day": -21076, "days_blocked": 3 },
+    "with_htf":    { "pnl": 88335,  "trades": 9,  "win_rate_pct": 77.78, "max_loss_day": -8190,  "days_blocked": 1 },
+    "hybrid":      { "pnl": 126287, "trades": 19, "win_rate_pct": 63.16, "max_loss_day": -10538, "days_blocked": 1 }
+  },
+
+  "days": [
+    {
+      "date": "2026-05-22", "pnl": -10538, "wins": 0, "losses": 2, "blocked_by_loss": false,
+      "trades": [
+        {"time":"12:25","symbol":"NIFTY","side":"PE","event":"bearish_bos","event_dir":"bear","htf_state":"neutral","size_multiplier":0.5,"base_lots":5,"final_lots":3,"qty":225,"strike":23850,"entry":183.7,"exit":159.8,"reason":"SL","pnl":-3876,"decision":"TAKE_HALF"},
+        {"time":"12:50","symbol":"NIFTY","side":"CE","event":"bullish_bos","event_dir":"bull","htf_state":"neutral","size_multiplier":0.5,"base_lots":5,"final_lots":3,"qty":225,"strike":23800,"entry":159.0,"exit":118.0,"reason":"SL","pnl":-6662,"decision":"TAKE_HALF"}
+      ]
+    },
+    {
+      "date": "2026-05-25", "pnl": -4704, "wins": 0, "losses": 2, "blocked_by_loss": false,
+      "trades": [
+        {"time":"12:35","symbol":"NIFTY","side":"PE","event":"bearish_bos","event_dir":"bear","htf_state":"neutral","size_multiplier":0.5,"base_lots":5,"final_lots":3,"qty":225,"strike":24000,"entry":110.2,"exit":95.8,"reason":"SL","pnl":-2348,"decision":"TAKE_HALF"},
+        {"time":"14:10","symbol":"NIFTY","side":"PE","event":"bearish_bos","event_dir":"bear","htf_state":"neutral","size_multiplier":0.5,"base_lots":5,"final_lots":3,"qty":225,"strike":24000,"entry":100.1,"exit":85.6,"reason":"SL","pnl":-2356,"decision":"TAKE_HALF"}
+      ]
+    },
+    {
+      "date": "2026-05-26", "pnl": 53195, "wins": 5, "losses": 1, "blocked_by_loss": false,
+      "trades": [
+        {"time":"11:25","symbol":"NIFTY","side":"PE","event":"bearish_bos","event_dir":"bear","htf_state":"neutral","size_multiplier":0.5,"base_lots":5,"final_lots":3,"qty":225,"strike":24100,"entry":74.8,"exit":58.3,"reason":"SL","pnl":-2673,"decision":"TAKE_HALF"},
+        {"time":"12:05","symbol":"NIFTY","side":"PE","event":"bearish_bos","event_dir":"bear","htf_state":"neutral","size_multiplier":0.5,"base_lots":5,"final_lots":3,"qty":225,"strike":24100,"entry":79.0,"exit":184.6,"reason":"EOD","pnl":17176,"decision":"TAKE_HALF"},
+        {"time":"12:30","symbol":"NIFTY","side":"PE","event":"bearish_bos","event_dir":"bear","htf_state":"neutral","size_multiplier":0.5,"base_lots":5,"final_lots":3,"qty":225,"strike":24050,"entry":51.2,"exit":135.0,"reason":"EOD","pnl":13634,"decision":"TAKE_HALF"},
+        {"time":"12:45","symbol":"NIFTY","side":"PE","event":"bearish_bos","event_dir":"bear","htf_state":"neutral","size_multiplier":0.5,"base_lots":5,"final_lots":3,"qty":225,"strike":24050,"entry":59.4,"exit":135.0,"reason":"EOD","pnl":12293,"decision":"TAKE_HALF"},
+        {"time":"12:55","symbol":"NIFTY","side":"PE","event":"bearish_bos","event_dir":"bear","htf_state":"neutral","size_multiplier":0.5,"base_lots":5,"final_lots":3,"qty":225,"strike":24050,"entry":74.4,"exit":135.0,"reason":"EOD","pnl":9848,"decision":"TAKE_HALF"},
+        {"time":"13:50","symbol":"NIFTY","side":"PE","event":"bearish_bos","event_dir":"bear","htf_state":"neutral","size_multiplier":0.5,"base_lots":5,"final_lots":3,"qty":225,"strike":24000,"entry":67.2,"exit":85.1,"reason":"EOD","pnl":2917,"decision":"TAKE_HALF"}
+      ]
+    },
+    {
+      "date": "2026-05-27", "pnl": -8190, "wins": 0, "losses": 1, "blocked_by_loss": true,
+      "trades": [
+        {"time":"13:10","symbol":"NIFTY","side":"PE","event":"bearish_bos","event_dir":"bear","htf_state":"confirm","size_multiplier":1.0,"base_lots":5,"final_lots":5,"qty":375,"strike":23950,"entry":163.0,"exit":137.8,"reason":"SL","pnl":-8190,"decision":"TAKE"}
+      ]
+    },
+    {
+      "date": "2026-06-01", "pnl": 80925, "wins": 6, "losses": 0, "blocked_by_loss": false,
+      "trades": [
+        {"time":"11:30","symbol":"NIFTY","side":"PE","event":"bearish_bos","event_dir":"bear","htf_state":"confirm","size_multiplier":1.0,"base_lots":5,"final_lots":5,"qty":375,"strike":23600,"entry":103.6,"exit":205.2,"reason":"EOD","pnl":33020,"decision":"TAKE"},
+        {"time":"13:00","symbol":"NIFTY","side":"PE","event":"bearish_bos","event_dir":"bear","htf_state":"confirm","size_multiplier":1.0,"base_lots":5,"final_lots":5,"qty":375,"strike":23550,"entry":105.2,"exit":165.6,"reason":"EOD","pnl":19614,"decision":"TAKE"},
+        {"time":"13:10","symbol":"NIFTY","side":"PE","event":"bearish_bos","event_dir":"bear","htf_state":"confirm","size_multiplier":1.0,"base_lots":5,"final_lots":5,"qty":375,"strike":23500,"entry":99.3,"exit":130.7,"reason":"EOD","pnl":10205,"decision":"TAKE"},
+        {"time":"13:55","symbol":"NIFTY","side":"PE","event":"bearish_bos","event_dir":"bear","htf_state":"confirm","size_multiplier":1.0,"base_lots":5,"final_lots":5,"qty":375,"strike":23500,"entry":98.3,"exit":130.7,"reason":"EOD","pnl":10530,"decision":"TAKE"},
+        {"time":"14:05","symbol":"NIFTY","side":"PE","event":"bearish_bos","event_dir":"bear","htf_state":"confirm","size_multiplier":1.0,"base_lots":5,"final_lots":5,"qty":375,"strike":23500,"entry":111.6,"exit":130.7,"reason":"EOD","pnl":6191,"decision":"TAKE"},
+        {"time":"14:20","symbol":"NIFTY","side":"PE","event":"bearish_bos","event_dir":"bear","htf_state":"confirm","size_multiplier":1.0,"base_lots":5,"final_lots":5,"qty":375,"strike":23450,"entry":95.7,"exit":99.9,"reason":"EOD","pnl":1365,"decision":"TAKE"}
+      ]
+    },
+    {
+      "date": "2026-06-02", "pnl": 15599, "wins": 1, "losses": 1, "blocked_by_loss": false,
+      "trades": [
+        {"time":"12:45","symbol":"NIFTY","side":"CE","event":"bullish_bos","event_dir":"bull","htf_state":"confirm","size_multiplier":1.0,"base_lots":5,"final_lots":5,"qty":375,"strike":23350,"entry":70.8,"exit":135.4,"reason":"EOD","pnl":21027,"decision":"TAKE"},
+        {"time":"13:30","symbol":"NIFTY","side":"CE","event":"bullish_bos","event_dir":"bull","htf_state":"confirm","size_multiplier":1.0,"base_lots":5,"final_lots":5,"qty":375,"strike":23500,"entry":55.1,"exit":38.4,"reason":"SL","pnl":-5428,"decision":"TAKE"}
+      ]
+    }
+  ],
+
+  "derived_metrics": {
+    "pct_change_from_without_htf": { "pnl_change": -37952, "pnl_change_pct": -23.11, "max_loss_improvement": 10538, "max_loss_improvement_pct": 50.0 },
+    "pct_change_from_with_htf": { "pnl_change": 37952, "pnl_change_pct": 42.96 }
+  },
+
+  "skip_log": [],
+
+  "live_code_template": {
+    "htf_sizing": "if htf_state == 'confirm': final_lots = max(1, round(BASE_LOTS * 1.0))\nelif htf_state == 'neutral': final_lots = max(1, round(BASE_LOTS * 0.5))\nelse: return  # skip",
+    "max_loss_guard": "if daily_pnl <= -MAX_LOSS: blocked_by_loss = True; return",
+    "cooldown": "if candles_since_last_signal < COOLDOWN_CANDLES: return"
+  },
+
+  "schema_rules": {
+    "source_of_truth": "trade_rows",
+    "summary_must_be_derived_from_trades": true,
+    "daily_pnl_must_equal_sum_of_trade_pnl": true,
+    "qty_must_equal_final_lots_times_lot_size": true,
+    "allowed_htf_states": ["confirm", "neutral", "oppose"],
+    "allowed_decisions": ["TAKE", "TAKE_HALF", "SKIP"],
+    "rounding_rule": "round trade pnl first, then aggregate"
+  }
+}

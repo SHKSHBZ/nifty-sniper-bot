@@ -1,0 +1,129 @@
+{
+  "backtest_date": "2026-06-03",
+  "strategy": "PriceActionBot — Hybrid HTF",
+  "description": "HTF confirms → full size | HTF neutral/None → half size | HTF opposite → skip",
+  "config": {
+    "timeframe_entry": "5min",
+    "timeframe_htf": "15min",
+    "htf_mode": "hybrid_scored",
+    "size_when_htf_confirms": 1.0,
+    "size_when_htf_neutral": 0.5,
+    "size_when_htf_opposes": 0.0,
+    "cooldown_candles": 2,
+    "max_trades_per_day": 6,
+    "max_daily_loss": 8000,
+    "rejection_close_pct": 0.5,
+    "retest_buffer_pct": 0.002,
+    "no_entry_after": "14:30",
+    "sl_tiers": {
+      "premium_100_plus": "12%",
+      "premium_70_100": "15%",
+      "premium_40_70": "20%",
+      "premium_below_40": "25%"
+    },
+    "exit_rules": ["SL hit", "EOD force close at 15:25"],
+    "strike_selection": "1-strike ITM from ATM"
+  },
+  "summary": {
+    "total_pnl": 126287,
+    "total_trades": 19,
+    "wins": 10,
+    "losses": 9,
+    "win_rate_pct": 53,
+    "max_daily_loss_hit": 3,
+    "full_size_trades": 9,
+    "half_size_trades": 10
+  },
+  "three_way_comparison": {
+    "without_htf": { "pnl": 164239, "trades": 19, "win_rate": 63, "max_loss_day": -21076 },
+    "with_htf":    { "pnl": 88335,  "trades": 9,  "win_rate": 78, "max_loss_day": -8190 },
+    "hybrid":      { "pnl": 126287, "trades": 19, "win_rate": 53, "max_loss_day": -10538 }
+  },
+  "days": [
+    {
+      "date": "2026-05-22",
+      "pnl": -10538,
+      "wins": 0,
+      "losses": 2,
+      "blocked_by_loss": false,
+      "note": "Half-size entries. Losses halved from −₹21,076 to −₹10,538.",
+      "trades": [
+        { "time": "12:25", "side": "PE", "strike": 23850, "entry": 183.7, "exit": 159.8, "reason": "SL", "pnl": -3876, "htf": "neutral", "size": 0.5 },
+        { "time": "12:50", "side": "CE", "strike": 23800, "entry": 159.0, "exit": 118.0, "reason": "SL", "pnl": -6662, "htf": "neutral", "size": 0.5 }
+      ]
+    },
+    {
+      "date": "2026-05-25",
+      "pnl": -4705,
+      "wins": 0,
+      "losses": 2,
+      "blocked_by_loss": false,
+      "note": "Half-size entries. Losses halved from −₹9,409 to −₹4,705.",
+      "trades": [
+        { "time": "12:35", "side": "PE", "strike": 24000, "entry": 110.2, "exit": 95.8, "reason": "SL", "pnl": -2348, "htf": "neutral", "size": 0.5 },
+        { "time": "14:10", "side": "PE", "strike": 24000, "entry": 100.1, "exit": 85.6, "reason": "SL", "pnl": -2356, "htf": "neutral", "size": 0.5 }
+      ]
+    },
+    {
+      "date": "2026-05-26",
+      "pnl": 53195,
+      "wins": 5,
+      "losses": 1,
+      "blocked_by_loss": false,
+      "note": "Half-size entries. HTF was None — PREVIOUSLY BLOCKED entirely with hard HTF filter. Hybrid recovers +₹53,195.",
+      "trades": [
+        { "time": "11:25", "side": "PE", "strike": 24100, "entry": 74.8, "exit": 58.3, "reason": "SL", "pnl": -2673, "htf": "neutral", "size": 0.5 },
+        { "time": "12:05", "side": "PE", "strike": 24100, "entry": 79.0, "exit": 184.6, "reason": "EOD", "pnl": 17176, "htf": "neutral", "size": 0.5 },
+        { "time": "12:30", "side": "PE", "strike": 24050, "entry": 51.2, "exit": 135.0, "reason": "EOD", "pnl": 13634, "htf": "neutral", "size": 0.5 },
+        { "time": "12:45", "side": "PE", "strike": 24050, "entry": 59.4, "exit": 135.0, "reason": "EOD", "pnl": 12293, "htf": "neutral", "size": 0.5 },
+        { "time": "12:55", "side": "PE", "strike": 24050, "entry": 74.4, "exit": 135.0, "reason": "EOD", "pnl": 9848, "htf": "neutral", "size": 0.5 },
+        { "time": "13:50", "side": "PE", "strike": 24000, "entry": 67.2, "exit": 85.1, "reason": "EOD", "pnl": 2917, "htf": "neutral", "size": 0.5 }
+      ]
+    },
+    {
+      "date": "2026-05-27",
+      "pnl": -8190,
+      "wins": 0,
+      "losses": 1,
+      "blocked_by_loss": true,
+      "note": "HTF was bear, full size. Hit max loss guard after 1 trade.",
+      "trades": [
+        { "time": "13:10", "side": "PE", "strike": 23950, "entry": 163.0, "exit": 137.8, "reason": "SL", "pnl": -8190, "htf": "bear", "size": 1.0 }
+      ]
+    },
+    {
+      "date": "2026-06-01",
+      "pnl": 80925,
+      "wins": 6,
+      "losses": 0,
+      "blocked_by_loss": false,
+      "note": "HTF was bear, full size. Strong down-trend day. 100% win rate.",
+      "trades": [
+        { "time": "11:30", "side": "PE", "strike": 23600, "entry": 103.6, "exit": 205.2, "reason": "EOD", "pnl": 33020, "htf": "bear", "size": 1.0 },
+        { "time": "13:00", "side": "PE", "strike": 23550, "entry": 105.2, "exit": 165.6, "reason": "EOD", "pnl": 19614, "htf": "bear", "size": 1.0 },
+        { "time": "13:10", "side": "PE", "strike": 23500, "entry": 99.3, "exit": 130.7, "reason": "EOD", "pnl": 10205, "htf": "bear", "size": 1.0 },
+        { "time": "13:55", "side": "PE", "strike": 23500, "entry": 98.3, "exit": 130.7, "reason": "EOD", "pnl": 10530, "htf": "bear", "size": 1.0 },
+        { "time": "14:05", "side": "PE", "strike": 23500, "entry": 111.6, "exit": 130.7, "reason": "EOD", "pnl": 6191, "htf": "bear", "size": 1.0 },
+        { "time": "14:20", "side": "PE", "strike": 23450, "entry": 95.7, "exit": 99.9, "reason": "EOD", "pnl": 1365, "htf": "bear", "size": 1.0 }
+      ]
+    },
+    {
+      "date": "2026-06-02",
+      "pnl": 15600,
+      "wins": 1,
+      "losses": 1,
+      "blocked_by_loss": false,
+      "note": "HTF was bull, full size. Up-trend day with one CE winner and one CE loser.",
+      "trades": [
+        { "time": "12:45", "side": "CE", "strike": 23350, "entry": 70.8, "exit": 135.4, "reason": "EOD", "pnl": 21027, "htf": "bull", "size": 1.0 },
+        { "time": "13:30", "side": "CE", "strike": 23500, "entry": 55.1, "exit": 38.4, "reason": "SL", "pnl": -5428, "htf": "bull", "size": 1.0 }
+      ]
+    }
+  ],
+  "pct_change_from_without_htf": {
+    "pnl_change": -37952,
+    "pnl_change_pct": -23.1,
+    "max_loss_improvement": 10538,
+    "note": "Hybrid reduces P&L by 23% vs no-HTF, but cuts worst day loss by 50% and keeps the best trend day (May 26) at half size instead of zero."
+  }
+}

@@ -58,12 +58,15 @@ class PaperExecutor:
         balance = self.balances.get(parent_index, self.initial_capital)
         
         # 2. Margin Check
-        total_value = price * quantity
-        margin_required = total_value if is_option else (total_value * 0.10)
-        
-        if margin_required > balance:
-            logger.warning(f"MARGIN REJECTED ({symbol}): Required {margin_required:.2f}, Balance {balance:.2f}")
-            return None
+        pos = self.positions.get(symbol, {'qty': 0})
+        is_closing = (side == 'BUY' and pos.get('qty', 0) < 0) or (side == 'SELL' and pos.get('qty', 0) > 0)
+        if not is_closing:
+            total_value = price * quantity
+            margin_required = total_value if is_option else (total_value * 0.10)
+            
+            if margin_required > balance:
+                logger.warning(f"MARGIN REJECTED ({symbol}): Required {margin_required:.2f}, Balance {balance:.2f}")
+                return None
 
         # 3. Simulate Network Latency
         if self.latency_ms > 0:
@@ -195,6 +198,82 @@ class PaperExecutor:
             time.sleep(0.1) # 100ms standard execution delay
             
         return success
+
+    def place_short_straddle(self, symbols, lots, ce_price=0, pe_price=0):
+        """
+        Executes a 2-leg Short Straddle (sell CE + sell PE) as a strategic unit.
+        If any leg fails, executes compensating rollback to close filled legs and prevent naked short exposure.
+        """
+        lot_size = symbols.get('lot_size', 50)
+        qty = lots * lot_size
+        legs = [
+            (symbols['ce'], 'SELL', qty, ce_price),
+            (symbols['pe'], 'SELL', qty, pe_price)
+        ]
+        results = []
+        success = True
+        for symbol, side, leg_qty, px in legs:
+            trade = self.place_order(symbol, side, leg_qty, price=px, is_option=True)
+            if not trade:
+                success = False
+                logger.error(f"FAILED TO FILL SHORT STRADDLE LEG: {symbol} {side}")
+                results.append(None)
+                break
+            results.append(trade)
+            if self.latency_ms > 0:
+                time.sleep(0.1)
+
+        while len(results) < len(legs):
+            results.append(None)
+
+        if not success:
+            logger.warning("Short Straddle leg failure detected; initiating compensating rollback...")
+            for idx, trade in enumerate(results):
+                if trade is not None:
+                    sym, side, leg_qty, px = legs[idx]
+                    rollback_side = 'BUY' if side == 'SELL' else 'SELL'
+                    rollback_px = trade.get('price', px)
+                    self.place_order(sym, rollback_side, leg_qty, price=rollback_px, is_option=True)
+
+        return {"success": success, "trades": results}
+
+    def place_short_strangle(self, symbols, lots, ce_price=0, pe_price=0):
+        """
+        Executes a 2-leg Short Strangle (sell OTM CE + sell OTM PE) as a strategic unit.
+        If any leg fails, executes compensating rollback to close filled legs and prevent naked short exposure.
+        """
+        lot_size = symbols.get('lot_size', 50)
+        qty = lots * lot_size
+        legs = [
+            (symbols['otm_ce'], 'SELL', qty, ce_price),
+            (symbols['otm_pe'], 'SELL', qty, pe_price)
+        ]
+        results = []
+        success = True
+        for symbol, side, leg_qty, px in legs:
+            trade = self.place_order(symbol, side, leg_qty, price=px, is_option=True)
+            if not trade:
+                success = False
+                logger.error(f"FAILED TO FILL SHORT STRANGLE LEG: {symbol} {side}")
+                results.append(None)
+                break
+            results.append(trade)
+            if self.latency_ms > 0:
+                time.sleep(0.1)
+
+        while len(results) < len(legs):
+            results.append(None)
+
+        if not success:
+            logger.warning("Short Strangle leg failure detected; initiating compensating rollback...")
+            for idx, trade in enumerate(results):
+                if trade is not None:
+                    sym, side, leg_qty, px = legs[idx]
+                    rollback_side = 'BUY' if side == 'SELL' else 'SELL'
+                    rollback_px = trade.get('price', px)
+                    self.place_order(sym, rollback_side, leg_qty, price=rollback_px, is_option=True)
+
+        return {"success": success, "trades": results}
 
     def save_results(self):
         """Saves trade history and equity curve to CSV files."""

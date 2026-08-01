@@ -1,0 +1,423 @@
+{
+  "backtest_date": "2026-06-03",
+  "strategy": "PriceActionBot",
+  "comparison": {
+    "without_htf": [
+      {
+        "date": "2026-05-22",
+        "pnl": -21076,
+        "wins": 0,
+        "losses": 2,
+        "blocked_by_loss": true,
+        "trades": [
+          {
+            "time": "12:25",
+            "side": "PE",
+            "strike": 23850,
+            "entry": 183.7,
+            "exit": 159.8,
+            "reason": "SL",
+            "pnl": -7751,
+            "htf": null,
+            "event": "bearish_bos"
+          },
+          {
+            "time": "12:50",
+            "side": "CE",
+            "strike": 23800,
+            "entry": 159.0,
+            "exit": 118.0,
+            "reason": "SL",
+            "pnl": -13325,
+            "htf": null,
+            "event": "bullish_bos"
+          }
+        ]
+      },
+      {
+        "date": "2026-05-25",
+        "pnl": -9409,
+        "wins": 0,
+        "losses": 2,
+        "blocked_by_loss": true,
+        "trades": [
+          {
+            "time": "12:35",
+            "side": "PE",
+            "strike": 24000,
+            "entry": 110.2,
+            "exit": 95.8,
+            "reason": "SL",
+            "pnl": -4696,
+            "htf": null,
+            "event": "bearish_bos"
+          },
+          {
+            "time": "14:10",
+            "side": "PE",
+            "strike": 24000,
+            "entry": 100.1,
+            "exit": 85.6,
+            "reason": "SL",
+            "pnl": -4712,
+            "htf": null,
+            "event": "bearish_bos"
+          }
+        ]
+      },
+      {
+        "date": "2026-05-26",
+        "pnl": 106389,
+        "wins": 5,
+        "losses": 1,
+        "blocked_by_loss": false,
+        "trades": [
+          {
+            "time": "11:25",
+            "side": "PE",
+            "strike": 24100,
+            "entry": 74.8,
+            "exit": 58.3,
+            "reason": "SL",
+            "pnl": -5346,
+            "htf": null,
+            "event": "bearish_bos"
+          },
+          {
+            "time": "12:05",
+            "side": "PE",
+            "strike": 24100,
+            "entry": 79.0,
+            "exit": 184.6,
+            "reason": "EOD",
+            "pnl": 34352,
+            "htf": null,
+            "event": "bearish_bos"
+          },
+          {
+            "time": "12:30",
+            "side": "PE",
+            "strike": 24050,
+            "entry": 51.2,
+            "exit": 135.0,
+            "reason": "EOD",
+            "pnl": 27268,
+            "htf": null,
+            "event": "bearish_bos"
+          },
+          {
+            "time": "12:45",
+            "side": "PE",
+            "strike": 24050,
+            "entry": 59.4,
+            "exit": 135.0,
+            "reason": "EOD",
+            "pnl": 24586,
+            "htf": null,
+            "event": "bearish_bos"
+          },
+          {
+            "time": "12:55",
+            "side": "PE",
+            "strike": 24050,
+            "entry": 74.4,
+            "exit": 135.0,
+            "reason": "EOD",
+            "pnl": 19695,
+            "htf": null,
+            "event": "bearish_bos"
+          },
+          {
+            "time": "13:50",
+            "side": "PE",
+            "strike": 24000,
+            "entry": 67.2,
+            "exit": 85.1,
+            "reason": "EOD",
+            "pnl": 5834,
+            "htf": null,
+            "event": "bearish_bos"
+          }
+        ]
+      },
+      {
+        "date": "2026-05-27",
+        "pnl": -8190,
+        "wins": 0,
+        "losses": 1,
+        "blocked_by_loss": true,
+        "trades": [
+          {
+            "time": "13:10",
+            "side": "PE",
+            "strike": 23950,
+            "entry": 163.0,
+            "exit": 137.8,
+            "reason": "SL",
+            "pnl": -8190,
+            "htf": "bear",
+            "event": "bearish_bos"
+          }
+        ]
+      },
+      {
+        "date": "2026-06-01",
+        "pnl": 80925,
+        "wins": 6,
+        "losses": 0,
+        "blocked_by_loss": false,
+        "trades": [
+          {
+            "time": "11:30",
+            "side": "PE",
+            "strike": 23600,
+            "entry": 103.6,
+            "exit": 205.2,
+            "reason": "EOD",
+            "pnl": 33020,
+            "htf": "bear",
+            "event": "bearish_bos"
+          },
+          {
+            "time": "13:00",
+            "side": "PE",
+            "strike": 23550,
+            "entry": 105.2,
+            "exit": 165.6,
+            "reason": "EOD",
+            "pnl": 19614,
+            "htf": "bear",
+            "event": "bearish_bos"
+          },
+          {
+            "time": "13:10",
+            "side": "PE",
+            "strike": 23500,
+            "entry": 99.3,
+            "exit": 130.7,
+            "reason": "EOD",
+            "pnl": 10205,
+            "htf": "bear",
+            "event": "bearish_bos"
+          },
+          {
+            "time": "13:55",
+            "side": "PE",
+            "strike": 23500,
+            "entry": 98.3,
+            "exit": 130.7,
+            "reason": "EOD",
+            "pnl": 10530,
+            "htf": "bear",
+            "event": "bearish_bos"
+          },
+          {
+            "time": "14:05",
+            "side": "PE",
+            "strike": 23500,
+            "entry": 111.6,
+            "exit": 130.7,
+            "reason": "EOD",
+            "pnl": 6191,
+            "htf": "bear",
+            "event": "bearish_bos"
+          },
+          {
+            "time": "14:20",
+            "side": "PE",
+            "strike": 23450,
+            "entry": 95.7,
+            "exit": 99.9,
+            "reason": "EOD",
+            "pnl": 1365,
+            "htf": "bear",
+            "event": "bearish_bos"
+          }
+        ]
+      },
+      {
+        "date": "2026-06-02",
+        "pnl": 15600,
+        "wins": 1,
+        "losses": 1,
+        "blocked_by_loss": false,
+        "trades": [
+          {
+            "time": "12:45",
+            "side": "CE",
+            "strike": 23350,
+            "entry": 70.8,
+            "exit": 135.4,
+            "reason": "EOD",
+            "pnl": 21027,
+            "htf": "bull",
+            "event": "bullish_bos"
+          },
+          {
+            "time": "13:30",
+            "side": "CE",
+            "strike": 23500,
+            "entry": 55.1,
+            "exit": 38.4,
+            "reason": "SL",
+            "pnl": -5428,
+            "htf": "bull",
+            "event": "bullish_bos"
+          }
+        ]
+      }
+    ],
+    "with_htf": [
+      {
+        "date": "2026-05-22",
+        "pnl": 0,
+        "wins": 0,
+        "losses": 0,
+        "blocked_by_loss": false,
+        "trades": []
+      },
+      {
+        "date": "2026-05-25",
+        "pnl": 0,
+        "wins": 0,
+        "losses": 0,
+        "blocked_by_loss": false,
+        "trades": []
+      },
+      {
+        "date": "2026-05-26",
+        "pnl": 0,
+        "wins": 0,
+        "losses": 0,
+        "blocked_by_loss": false,
+        "trades": []
+      },
+      {
+        "date": "2026-05-27",
+        "pnl": -8190,
+        "wins": 0,
+        "losses": 1,
+        "blocked_by_loss": true,
+        "trades": [
+          {
+            "time": "13:10",
+            "side": "PE",
+            "strike": 23950,
+            "entry": 163.0,
+            "exit": 137.8,
+            "reason": "SL",
+            "pnl": -8190,
+            "htf": "bear",
+            "event": "bearish_bos"
+          }
+        ]
+      },
+      {
+        "date": "2026-06-01",
+        "pnl": 80925,
+        "wins": 6,
+        "losses": 0,
+        "blocked_by_loss": false,
+        "trades": [
+          {
+            "time": "11:30",
+            "side": "PE",
+            "strike": 23600,
+            "entry": 103.6,
+            "exit": 205.2,
+            "reason": "EOD",
+            "pnl": 33020,
+            "htf": "bear",
+            "event": "bearish_bos"
+          },
+          {
+            "time": "13:00",
+            "side": "PE",
+            "strike": 23550,
+            "entry": 105.2,
+            "exit": 165.6,
+            "reason": "EOD",
+            "pnl": 19614,
+            "htf": "bear",
+            "event": "bearish_bos"
+          },
+          {
+            "time": "13:10",
+            "side": "PE",
+            "strike": 23500,
+            "entry": 99.3,
+            "exit": 130.7,
+            "reason": "EOD",
+            "pnl": 10205,
+            "htf": "bear",
+            "event": "bearish_bos"
+          },
+          {
+            "time": "13:55",
+            "side": "PE",
+            "strike": 23500,
+            "entry": 98.3,
+            "exit": 130.7,
+            "reason": "EOD",
+            "pnl": 10530,
+            "htf": "bear",
+            "event": "bearish_bos"
+          },
+          {
+            "time": "14:05",
+            "side": "PE",
+            "strike": 23500,
+            "entry": 111.6,
+            "exit": 130.7,
+            "reason": "EOD",
+            "pnl": 6191,
+            "htf": "bear",
+            "event": "bearish_bos"
+          },
+          {
+            "time": "14:20",
+            "side": "PE",
+            "strike": 23450,
+            "entry": 95.7,
+            "exit": 99.9,
+            "reason": "EOD",
+            "pnl": 1365,
+            "htf": "bear",
+            "event": "bearish_bos"
+          }
+        ]
+      },
+      {
+        "date": "2026-06-02",
+        "pnl": 15600,
+        "wins": 1,
+        "losses": 1,
+        "blocked_by_loss": false,
+        "trades": [
+          {
+            "time": "12:45",
+            "side": "CE",
+            "strike": 23350,
+            "entry": 70.8,
+            "exit": 135.4,
+            "reason": "EOD",
+            "pnl": 21027,
+            "htf": "bull",
+            "event": "bullish_bos"
+          },
+          {
+            "time": "13:30",
+            "side": "CE",
+            "strike": 23500,
+            "entry": 55.1,
+            "exit": 38.4,
+            "reason": "SL",
+            "pnl": -5428,
+            "htf": "bull",
+            "event": "bullish_bos"
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -46,6 +46,7 @@ class Regime(str, Enum):
     TREND_DOWN = "TREND_DOWN"
     RANGE = "RANGE"
     CHOP = "CHOP"
+    VOLATILITY_CRUSH = "VOLATILITY_CRUSH"
 
 
 @dataclass
@@ -65,6 +66,9 @@ class ClassifierFeatures:
     or_low: float = 0.0
     vix_level: float = 0.0
     vix_chg_15m: float = 0.0
+    straddle_decay_15m: float = 0.0
+    spot_range_15m: float = 0.0
+    spot_range_pts: float = 0.0
     dte: int = 99
     event_flag: bool = False
     prev_day_close: float = 0.0
@@ -110,7 +114,7 @@ class RegimeClassifier:
     immediately — those are risk-off conditions we don't want to delay.
     """
 
-    IMMEDIATE_REGIMES = {Regime.NO_TRADE, Regime.EXPIRY, Regime.WAIT}
+    IMMEDIATE_REGIMES = {Regime.NO_TRADE, Regime.EXPIRY, Regime.WAIT, Regime.VOLATILITY_CRUSH}
 
     def __init__(self, config: Optional[ClassifierConfig] = None):
         self.config = config or ClassifierConfig()
@@ -175,6 +179,8 @@ class RegimeClassifier:
             return Regime.NO_TRADE
         if f.vix_level > c.vix_hard_halt or f.vix_chg_15m > c.vix_chg_hard_halt:
             return Regime.NO_TRADE
+        if f.straddle_decay_15m > 0.03 and (f.spot_range_15m <= 0.003 or (0 < f.spot_range_pts <= 30.0) or f.spot_range_15m == 0.0):
+            return Regime.VOLATILITY_CRUSH
         if f.ts.time() < c.no_entry_before and abs(f.gap_pct) > c.gap_threshold:
             return Regime.WAIT
         if f.dte == 0:

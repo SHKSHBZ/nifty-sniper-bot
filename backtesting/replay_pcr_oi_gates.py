@@ -22,7 +22,7 @@ except Exception:
 
 # Ensure repo root on path so signal_engine imports cleanly.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from signal_engine import SignalEngine
+from signal_engine import PriceActionBot
 
 CHECKPOINTS = ["10:00", "10:30", "11:00", "11:30", "12:00", "12:30",
                "13:00", "13:30", "14:00", "14:30", "15:00"]
@@ -45,7 +45,7 @@ def replay(csv_path: Path) -> None:
         by_ts[r["timestamp"]].append(r)
     timestamps = sorted(by_ts.keys(), key=parse_ts)
 
-    engine = SignalEngine()
+    engine = PriceActionBot()
     seen = set()
 
     print(f"Replay file: {csv_path}")
